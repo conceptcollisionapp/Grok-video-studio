@@ -8,12 +8,12 @@ function App() {
 
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('xaiKey') || '');
   const [backendUrl] = useState('https://grok-video-studio-production.up.railway.app');
-  const [script, setScript] = useState('');
+  const [script, setScript] = useState(() => localStorage.getItem('script') || '');
   const [voicePreview, setVoicePreview] = useState(() => localStorage.getItem('voicePreview') || null);
   const [characterPreviews, setCharacterPreviews] = useState(() => JSON.parse(localStorage.getItem('characterPreviews') || '[]'));
   const [selectedVoice, setSelectedVoice] = useState('default');
-  const [resolution, setResolution] = useState('720p');
-  const [scenes, setScenes] = useState([{ id: 1, description: "News Anchor", start: 0, duration: 12, end: 12, image: null }]);
+  const [resolution, setResolution] = useState(() => localStorage.getItem('resolution') || '720p');
+  const [scenes, setScenes] = useState(() => JSON.parse(localStorage.getItem('scenes') || '[{"id":1,"description":"News Anchor","start":0,"duration":12,"end":12,"image":null}]'));
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState('');
   const [status, setStatus] = useState('');
 
@@ -30,7 +30,10 @@ function App() {
     localStorage.setItem('xaiKey', apiKey);
     localStorage.setItem('darkMode', darkMode);
     localStorage.setItem('characterPreviews', JSON.stringify(characterPreviews));
-  }, [apiKey, darkMode, characterPreviews]);
+    localStorage.setItem('script', script);
+    localStorage.setItem('resolution', resolution);
+    localStorage.setItem('scenes', JSON.stringify(scenes));
+  }, [apiKey, darkMode, characterPreviews, script, resolution, scenes]);
 
   useEffect(() => {
     document.documentElement.style.backgroundColor = darkMode ? '#0f0f0f' : '#f8f9fa';
@@ -183,6 +186,8 @@ function App() {
             ns[i].end = ns[i].start + ns[i].duration; 
             setScenes(ns); 
           }} style={{width:'60px'}} />s
+
+          <button onClick={() => setScenes(scenes.filter((_, idx) => idx !== i))} style={{marginTop: '8px'}}>Delete Still</button>
         </div>
       ))}
       <button onClick={() => {
