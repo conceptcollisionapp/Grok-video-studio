@@ -57,7 +57,7 @@ async def generate(
             "job_id": job_id,
             "status": "error",
             "message": str(e)
-        }, status_code=500)        }
+        }, status_code=500)        
         
         response = requests.post("https://api.x.ai/v1/video/generate", json=payload, headers=headers, timeout=60)
         
