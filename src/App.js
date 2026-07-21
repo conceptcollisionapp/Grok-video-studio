@@ -84,72 +84,23 @@ function App() {
   };
 
   return (
-    <>
-      <div style={{ padding: '15px', maxWidth: '100%', margin: 'auto', minHeight: '100vh' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-          <h1>📰 Grok Video Studio</h1>
-          <button onClick={toggleMode} style={{ padding: '8px 16px', borderRadius: '8px' }}>
-            {darkMode ? '☀️ Light' : '🌙 Dark'}
-          </button>
-        </div>
-
-        <input type="password" placeholder="xAI API Key (saved)" value={apiKey} onChange={e => setApiKey(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}} />
-
-        <h3>Grok Voices</h3>
-        <select value={selectedVoice} onChange={e => setSelectedVoice(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
-          {grokVoices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
-        </select>
-
-        <h3>Custom Voice Sample</h3>
-        <input type="file" accept="audio/*" onChange={handleVoice} />
-        {voicePreview && <p>Voice saved <button onClick={clearVoice}>Clear</button></p>}
-
-        <h3>Character References (Multiple)</h3>
-        <input type="file" accept="image/*" onChange={handleCharacter} />
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', margin: '10px 0' }}>
-          {characterPreviews.map((p, i) => (
-            <div key={i}>
-              <img src={p} alt="char" style={{ maxWidth: '120px', borderRadius: '8px' }} />
-              <button onClick={() => removeCharacter(i)}>Remove</button>
-            </div>
-          ))}
-        </div>
-
-        <h3>Resolution</h3>
-        <select value={resolution} onChange={e => setResolution(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
-          {resolutions.map(r => <option key={r} value={r}>{r}</option>)}
-        </select>
-
-        <h3>Script</h3>
-        <textarea value={script} onChange={e => setScript(e.target.value)} rows="6" style={{width:'100%', padding:'12px', marginBottom:'15px'}} placeholder="Full news script..." />
-
-        <h3>Timeline - Stills</h3>
-        {scenes.map((s, i) => (
-          <div key={s.id} style={{ border: '1px solid #444', padding: '12px', margin: '10px 0', borderRadius: '8px' }}>
-            <input value={s.description} onChange={e => { const ns = [...scenes]; ns[i].description = e.target.value; setScenes(ns); }} placeholder="Description" style={{width:'70%'}} />
-            Start <input type="number" value={s.start} onChange={e => { const ns = [...scenes]; ns[i].start = +e.target.value; setScenes(ns); }} style={{width:'60px'}} />s 
-            Duration <input type="number" value={s.duration} onChange={e => { const ns = [...scenes]; ns[i].duration = +e.target.value; setScenes(ns); }} style={{width:'60px'}} />s
-          </div>
-        ))}
-        <button onClick={() => setScenes([...scenes, { id: Date.now(), description: "New still", start: scenes.length * 10, duration: 8 }])}>+ Add Still</button>
-
-        <br /><br />
-        <button onClick={generateVideo} style={{ padding: '18px 50px', fontSize: '1.3em', background: '#00ff9f', border: 'none', borderRadius: '12px' }}>Generate Video</button>
-
-        {generatedVideoUrl && (
-          <div style={{ marginTop: '30px' }}>
-            <video controls src={generatedVideoUrl} style={{ width: '100%' }} />
-            <button onClick={exportVideo} style={{ marginTop: '10px', padding: '12px 30px' }}>Export MP4</button>
-          </div>
-        )}
-
-        <p>{status}</p>
+    <div style={{ padding: '15px', maxWidth: '100%', margin: 'auto', minHeight: '100vh' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+        <h1>📰 Grok Video Studio</h1>
+        <button onClick={toggleMode} style={{ padding: '8px 16px', borderRadius: '8px' }}>
+          {darkMode ? '☀️ Light' : '🌙 Dark'}
+        </button>
       </div>
-    </>
-  );
-}
 
-export default App;      <input type="file" accept="audio/*" onChange={handleVoice} />
+      <input type="password" placeholder="xAI API Key (saved)" value={apiKey} onChange={e => setApiKey(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}} />
+
+      <h3>Grok Voices</h3>
+      <select value={selectedVoice} onChange={e => setSelectedVoice(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
+        {grokVoices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+      </select>
+
+      <h3>Custom Voice Sample</h3>
+      <input type="file" accept="audio/*" onChange={handleVoice} />
       {voicePreview && <p>Voice saved <button onClick={clearVoice}>Clear</button></p>}
 
       <h3>Character References (Multiple)</h3>
@@ -159,105 +110,6 @@ export default App;      <input type="file" accept="audio/*" onChange={handleVoi
           <div key={i}>
             <img src={p} alt="char" style={{ maxWidth: '120px', borderRadius: '8px' }} />
             <button onClick={() => removeCharacter(i)}>Remove</button>
-          </div>
-        ))}
-      </div>
-
-      <h3>Resolution</h3>
-      <select value={resolution} onChange={e => setResolution(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
-        {resolutions.map(r => <option key={r} value={r}>{r}</option>)}
-      </select>
-
-      <label>
-        <input type="checkbox" checked={showCaptions} onChange={() => setShowCaptions(!showCaptions)} /> Show Captions
-      </label>
-
-      <h3>Script</h3>
-      <textarea value={script} onChange={e => setScript(e.target.value)} rows="6" style={{width:'100%', padding:'12px', marginBottom:'15px'}} placeholder="Full news script..." />
-
-      <h3>Timeline - Stills</h3>
-      {scenes.map((s, i) => (
-        <div key={s.id} style={{ border: '1px solid #444', padding: '12px', margin: '10px 0', borderRadius: '8px' }}>
-          <input value={s.description} onChange={e => { const ns = [...scenes]; ns[i].description = e.target.value; setScenes(ns); }} placeholder="Description" style={{width:'70%'}} />
-          Start <input type="number" value={s.start} onChange={e => { const ns = [...scenes]; ns[i].start = +e.target.value; setScenes(ns); }} style={{width:'60px'}} />s 
-          Duration <input type="number" value={s.duration} onChange={e => { const ns = [...scenes]; ns[i].duration = +e.target.value; setScenes(ns); }} style={{width:'60px'}} />s
-        </div>
-      ))}
-      <button onClick={() => setScenes([...scenes, { id: Date.now(), description: "New still", start: scenes.length * 10, duration: 8 }])}>+ Add Still</button>
-
-      <br /><br />
-      <button onClick={generateVideo} style={{ padding: '18px 50px', fontSize: '1.3em', background: '#00ff9f', border: 'none', borderRadius: '12px' }}>Generate Video</button>
-
-      {generatedVideoUrl && (
-        <div style={{ marginTop: '30px' }}>
-          <video controls src={generatedVideoUrl} style={{ width: '100%' }} />
-          {showCaptions && <p style={{ textAlign: 'center', marginTop: '10px', fontSize: '1.1em' }}>Live captions would appear here</p>}
-          <button onClick={exportVideo} style={{ marginTop: '10px', padding: '12px 30px' }}>Export MP4</button>
-        </div>
-      )}
-
-      <p>{status}</p>
-    </div>
-  );
-}
-
-export default App;      <input type="file" accept="audio/*" onChange={handleVoice} />
-      {voicePreview && <p>Voice saved <button onClick={clearVoice}>Clear</button></p>}
-
-      <h3>Character References (Multiple)</h3>
-      <input type="file" accept="image/*" onChange={handleCharacter} />
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', margin: '10px 0' }}>
-        {characterPreviews.map((p, i) => (
-          <div key={i}>
-            <img src={p} alt="char" style={{ maxWidth: '120px', borderRadius: '8px' }} />
-            <button onClick={() => removeCharacter(i)}>Remove</button>
-          </div>
-        ))}
-      </div>
-
-      <h3>Resolution</h3>
-      <select value={resolution} onChange={e => setResolution(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
-        {resolutions.map(r => <option key={r} value={r}>{r}</option>)}
-      </select>
-
-      <h3>Script</h3>
-      <textarea value={script} onChange={e => setScript(e.target.value)} rows="6" style={{width:'100%', padding:'12px', marginBottom:'15px'}} placeholder="Full news script..." />
-
-      <h3>Timeline - Stills</h3>
-      {scenes.map((s, i) => (
-        <div key={s.id} style={{ border: '1px solid #444', padding: '12px', margin: '10px 0', borderRadius: '8px' }}>
-          <input value={s.description} onChange={e => { const ns = [...scenes]; ns[i].description = e.target.value; setScenes(ns); }} placeholder="Description" style={{width:'70%'}} />
-          Start <input type="number" value={s.start} onChange={e => { const ns = [...scenes]; ns[i].start = +e.target.value; setScenes(ns); }} style={{width:'60px'}} />s 
-          Duration <input type="number" value={s.duration} onChange={e => { const ns = [...scenes]; ns[i].duration = +e.target.value; setScenes(ns); }} style={{width:'60px'}} />s
-        </div>
-      ))}
-      <button onClick={() => setScenes([...scenes, { id: Date.now(), description: "New still", start: scenes.length * 10, duration: 8 }])}>+ Add Still</button>
-
-      <br /><br />
-      <button onClick={generateVideo} style={{ padding: '18px 50px', fontSize: '1.3em', background: '#00ff9f', border: 'none', borderRadius: '12px' }}>Generate Video</button>
-
-      {generatedVideoUrl && (
-        <div style={{ marginTop: '30px' }}>
-          <video controls src={generatedVideoUrl} style={{ width: '100%' }} />
-          <button onClick={exportVideo} style={{ marginTop: '10px', padding: '12px 30px' }}>Export MP4</button>
-        </div>
-      )}
-
-      <p>{status}</p>
-    </div>
-  );
-}
-
-export default App;      <input type="file" accept="audio/*" onChange={handleVoice} />
-      {voicePreview && <p>Voice saved <button onClick={clearVoice}>Clear</button></p>}
-
-      <h3>Character References (Multiple)</h3>
-      <input type="file" accept="image/*" onChange={handleCharacter} />
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', margin: '10px 0' }}>
-        {characterPreviews.map((p, i) => (
-          <div key={i}>
-            <img src={p} alt="char" style={{ maxWidth: '120px', borderRadius: '8px' }} />
-            <button onClick={() => clearCharacter(i)} style={{display:'block'}}>Remove</button>
           </div>
         ))}
       </div>
