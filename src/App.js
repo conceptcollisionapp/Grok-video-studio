@@ -13,7 +13,7 @@ function App() {
   const [characterPreviews, setCharacterPreviews] = useState(() => JSON.parse(localStorage.getItem('characterPreviews') || '[]'));
   const [selectedVoice, setSelectedVoice] = useState('default');
   const [resolution, setResolution] = useState('720p');
-  const [scenes, setScenes] = useState([{ id: 1, description: "News Anchor", start: 0, duration: 12 }]);
+  const [scenes, setScenes] = useState([{ id: 1, description: "News Anchor", start: 0, duration: 12, image: null }]);
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState('');
   const [status, setStatus] = useState('');
 
@@ -66,6 +66,15 @@ function App() {
     setCharacterPreviews(newPreviews);
   };
 
+  const updateSceneImage = (index, file) => {
+    if (file) {
+      const url = URL.createObjectURL(file);
+      const ns = [...scenes];
+      ns[index].image = url;
+      setScenes(ns);
+    }
+  };
+
   const generateVideo = async () => {
     setStatus('Generating with Grok Imagine 1.5...');
     setTimeout(() => {
@@ -102,6 +111,54 @@ function App() {
       <h3>Custom Voice Sample</h3>
       <input type="file" accept="audio/*" onChange={handleVoice} />
       {voicePreview && <p>Voice saved <button onClick={clearVoice}>Clear</button></p>}
+
+      <h3>Character References (Multiple)</h3>
+      <input type="file" accept="image/*" onChange={handleCharacter} />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', margin: '10px 0' }}>
+        {characterPreviews.map((p, i) => (
+          <div key={i}>
+            <img src={p} alt="char" style={{ maxWidth: '120px', borderRadius: '8px' }} />
+            <button onClick={() => removeCharacter(i)}>Remove</button>
+          </div>
+        ))}
+      </div>
+
+      <h3>Resolution</h3>
+      <select value={resolution} onChange={e => setResolution(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
+        {resolutions.map(r => <option key={r} value={r}>{r}</option>)}
+      </select>
+
+      <h3>Script</h3>
+      <textarea value={script} onChange={e => setScript(e.target.value)} rows="6" style={{width:'100%', padding:'12px', marginBottom:'15px'}} placeholder="Full news script..." />
+
+      <h3>Timeline - Stills (with images)</h3>
+      {scenes.map((s, i) => (
+        <div key={s.id} style={{ border: '1px solid #444', padding: '12px', margin: '10px 0', borderRadius: '8px' }}>
+          <input value={s.description} onChange={e => { const ns = [...scenes]; ns[i].description = e.target.value; setScenes(ns); }} placeholder="Description" style={{width:'70%'}} />
+          <input type="file" accept="image/*" onChange={e => updateSceneImage(i, e.target.files[0])} />
+          {s.image && <img src={s.image} alt="still" style={{ maxWidth: '150px', margin: '5px 0' }} />}
+          Start <input type="number" value={s.start} onChange={e => { const ns = [...scenes]; ns[i].start = +e.target.value; setScenes(ns); }} style={{width:'60px'}} />s 
+          Duration <input type="number" value={s.duration} onChange={e => { const ns = [...scenes]; ns[i].duration = +e.target.value; setScenes(ns); }} style={{width:'60px'}} />s
+        </div>
+      ))}
+      <button onClick={() => setScenes([...scenes, { id: Date.now(), description: "New still", start: scenes.length * 10, duration: 8, image: null }])}>+ Add Still</button>
+
+      <br /><br />
+      <button onClick={generateVideo} style={{ padding: '18px 50px', fontSize: '1.3em', background: '#00ff9f', border: 'none', borderRadius: '12px' }}>Generate Video</button>
+
+      {generatedVideoUrl && (
+        <div style={{ marginTop: '30px' }}>
+          <video controls src={generatedVideoUrl} style={{ width: '100%' }} />
+          <button onClick={exportVideo} style={{ marginTop: '10px', padding: '12px 30px' }}>Export MP4</button>
+        </div>
+      )}
+
+      <p>{status}</p>
+    </div>
+  );
+}
+
+export default App;      {voicePreview && <p>Voice saved <button onClick={clearVoice}>Clear</button></p>}
 
       <h3>Character References (Multiple)</h3>
       <input type="file" accept="image/*" onChange={handleCharacter} />
