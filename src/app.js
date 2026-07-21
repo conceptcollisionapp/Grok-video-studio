@@ -7,7 +7,7 @@ function App() {
   });
 
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('xaiKey') || '');
-  const [backendUrl] = useState('grok-video-studio-production.up.railway.app');
+  const [backendUrl] = useState('https://grok-video-studio-production.up.railway.app');
   const [script, setScript] = useState(() => localStorage.getItem('script') || '');
   const [voicePreview, setVoicePreview] = useState(() => localStorage.getItem('voicePreview') || null);
   const [characterPreviews, setCharacterPreviews] = useState(() => JSON.parse(localStorage.getItem('characterPreviews') || '[]'));
