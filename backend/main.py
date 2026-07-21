@@ -8,15 +8,14 @@ app = FastAPI(title="Grok Video Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change to your Vercel URL in production
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 @app.get("/")
 async def root():
-    return {"status": "Grok Video Backend is running!"}
+    return {"status": "Backend running"}
 
 @app.post("/generate")
 async def generate(
@@ -26,9 +25,7 @@ async def generate(
     resolution: str = Form('720p')
 ):
     job_id = str(uuid.uuid4())
-    
     try:
-        # Real xAI Imagine Video call (adjust endpoint as per xAI docs)
         headers = {"Authorization": f"Bearer {api_key}"}
         payload = {
             "prompt": prompt,
@@ -36,17 +33,13 @@ async def generate(
             "resolution": resolution,
             "voice_id": voice_id
         }
-        
-        response = requests.post("https://api.x.ai/v1/video/generate", json=payload, headers=headers)
+        response = requests.post("https://api.x.ai/v1/video/generate", json=payload, headers=headers, timeout=60)
         result = response.json()
-        
         return JSONResponse({
             "job_id": job_id,
             "status": "success",
             "video_url": result.get("url"),
-            "message": "Video generated with Grok Imagine 1.5"
+            "message": "Video generated"
         })
     except Exception as e:
         return JSONResponse({"job_id": job_id, "status": "error", "message": str(e)}, status_code=500)
-
-# Add /clone-voice endpoint later if needed
