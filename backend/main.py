@@ -26,7 +26,7 @@ async def generate(
     resolution: str = Form('720p')
 ):
     job_id = str(uuid.uuid4())
-    
+
     try:
         headers = {"Authorization": f"Bearer {api_key}"}
         payload = {
@@ -35,16 +35,21 @@ async def generate(
             "resolution": resolution,
             "voice_id": voice_id
         }
-        
-        response = requests.post("https://api.x.ai/v1/video/generate", json=payload, headers=headers, timeout=60)
-        
+
+        response = requests.post(
+            "https://api.x.ai/v1/video/generate",
+            json=payload,
+            headers=headers,
+            timeout=60
+        )
+
         if not response.ok:
             return JSONResponse({
                 "job_id": job_id,
                 "status": "error",
                 "message": f"xAI API error ({response.status_code}): {response.text[:200]}"
             }, status_code=response.status_code)
-        
+
         result = response.json()
         return JSONResponse({
             "job_id": job_id,
@@ -52,139 +57,12 @@ async def generate(
             "video_url": result.get("url"),
             "message": "Video generated with Grok Imagine 1.5"
         })
+
     except Exception as e:
         return JSONResponse({
             "job_id": job_id,
             "status": "error",
             "message": str(e)
-        }, status_code=500)        
-        
-        response = requests.post("https://api.x.ai/v1/video/generate", json=payload, headers=headers, timeout=60)
-        
-        if not response.ok:
-            return JSONResponse({
-                "job_id": job_id,
-                "status": "error",
-                "message": f"xAI API error ({response.status_code}): {response.text[:200]}"
-            }, status_code=response.status_code)
-        
-        result = response.json()
-        return JSONResponse({
-            "job_id": job_id,
-            "status": "success",
-            "video_url": result.get("url"),
-            "message": "Video generated with Grok Imagine 1.5"
-        })
-    except Exception as e:
-        return JSONResponse({
-            "job_id": job_id,
-            "status": "error",
-            "message": str(e)
-        }, status_code=500)        }
-        
-        response = requests.post("https://api.x.ai/v1/video/generate", json=payload, headers=headers, timeout=60)
-        
-        if not response.ok:
-            return JSONResponse({
-                "job_id": job_id,
-                "status": "error",
-                "message": f"xAI API error ({response.status_code}): {response.text[:200]}"
-            }, status_code=response.status_code)
-        
-        result = response.json()
-        return JSONResponse({
-            "job_id": job_id,
-            "status": "success",
-            "video_url": result.get("url"),
-            "message": "Video generated with Grok Imagine 1.5"
-        })
-    except Exception as e:
-        return JSONResponse({
-            "job_id": job_id,
-            "status": "error",
-            "message": str(e)
-        }, status_code=500)        }
-        
-        response = requests.post("https://api.x.ai/v1/video/generate", json=payload, headers=headers, timeout=60)
-        
-        if not response.ok:
-            return JSONResponse({
-                "job_id": job_id,
-                "status": "error",
-                "message": f"xAI API error ({response.status_code}): {response.text[:200]}"
-            }, status_code=response.status_code)
-        
-        result = response.json()
-        return JSONResponse({
-            "job_id": job_id,
-            "status": "success",
-            "video_url": result.get("url"),
-            "message": "Video generated with Grok Imagine 1.5"
-        })
-    except Exception as e:
-        return JSONResponse({
-            "job_id": job_id,
-            "status": "error",
-            "message": str(e)
-        }, status_code=500)        }
-        
-        response = requests.post("https://api.x.ai/v1/video/generate", json=payload, headers=headers, timeout=60)
-        
-        if not response.ok:
-            return JSONResponse({
-                "job_id": job_id,
-                "status": "error",
-                "message": f"xAI API error ({response.status_code}): {response.text[:200]}"
-            }, status_code=response.status_code)
-        
-        result = response.json()
-        return JSONResponse({
-            "job_id": job_id,
-            "status": "success",
-            "video_url": result.get("url"),
-            "message": "Video generated with Grok Imagine 1.5"
-        })
-    except Exception as e:
-        return JSONResponse({
-            "job_id": job_id,
-            "status": "error",
-            "message": str(e)
-        }, status_code=500)        }
-        
-        response = requests.post("https://api.x.ai/v1/video/generate", json=payload, headers=headers, timeout=60)
-        
-        if response.status_code != 200:
-            return JSONResponse({
-                "job_id": job_id,
-                "status": "error",
-                "message": f"xAI API error: {response.text}"
-            }, status_code=response.status_code)
-        
-        result = response.json()
-        return JSONResponse({
-            "job_id": job_id,
-            "status": "success",
-            "video_url": result.get("url"),
-            "message": "Video generated with Grok Imagine 1.5"
-        })
-    except Exception as e:
-        return JSONResponse({
-            "job_id": job_id,
-            "status": "error",
-            "message": str(e)
-        }, status_code=500)            "voice_id": voice_id
-        }
-        
-        response = requests.post("https://api.x.ai/v1/video/generate", json=payload, headers=headers, timeout=60)
-        result = response.json()
-        
-        return JSONResponse({
-            "job_id": job_id,
-            "status": "success",
-            "video_url": result.get("url"),
-            "message": "Video generated with Grok Imagine 1.5"
-        })
-    except Exception as e:
-        return JSONResponse({"job_id": job_id, "status": "error", "message": str(e)}, status_code=500)
+        }, status_code=500)
 
 # Add voice cloning endpoint later
