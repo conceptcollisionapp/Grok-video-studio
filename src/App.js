@@ -1,9 +1,13 @@
 import React, { useState, useEffect } from 'react';
 
 function App() {
-  const [darkMode, setDarkMode] = useState(() => localStorage.getItem('darkMode') !== 'false');
+  const [darkMode, setDarkMode] = useState(() => {
+    const saved = localStorage.getItem('darkMode');
+    return saved === null ? true : saved === 'true';
+  });
+
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('xaiKey') || '');
-  const [backendUrl] = useState('https://your-railway-app.up.railway.app');
+  const [backendUrl] = useState('https://your-railway-app.up.railway.app'); // Update this
   const [script, setScript] = useState('');
   const [voicePreview, setVoicePreview] = useState(() => localStorage.getItem('voicePreview') || null);
   const [characterPreviews, setCharacterPreviews] = useState(() => JSON.parse(localStorage.getItem('characterPreviews') || '[]'));
@@ -11,69 +15,135 @@ function App() {
   const [resolution, setResolution] = useState('720p');
   const [scenes, setScenes] = useState([{ id: 1, description: "News Anchor", start: 0, duration: 12, transition: 'fade' }]);
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState('');
-  const [history, setHistory] = useState([]);
   const [status, setStatus] = useState('');
-  const [progress, setProgress] = useState(0);
 
-  const grokVoices = [ /* same */ ];
+  const grokVoices = [
+    { id: 'default', name: 'Default Grok' },
+    { id: 'male-news', name: 'Professional Male Anchor' },
+    { id: 'female-clear', name: 'Clear Female Narrator' },
+    { id: 'energetic', name: 'Energetic' }
+  ];
+
   const resolutions = ['480p', '720p', '1080p'];
-  const transitions = ['fade', 'zoom', 'slide'];
 
   useEffect(() => {
     localStorage.setItem('xaiKey', apiKey);
+    localStorage.setItem('darkMode', darkMode);
     localStorage.setItem('characterPreviews', JSON.stringify(characterPreviews));
-  }, [apiKey, characterPreviews]);
+  }, [apiKey, darkMode, characterPreviews]);
 
-  // Toggle mode, handle files, etc. (same logic as before)
+  useEffect(() => {
+    document.documentElement.style.backgroundColor = darkMode ? '#0f0f0f' : '#f8f9fa';
+    document.documentElement.style.color = darkMode ? '#fff' : '#000';
+  }, [darkMode]);
+
+  const toggleMode = () => setDarkMode(!darkMode);
+
+  const handleVoice = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      setVoicePreview(url);
+      localStorage.setItem('voicePreview', url);
+    }
+  };
+
+  const handleCharacter = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      setCharacterPreviews([...characterPreviews, url]);
+    }
+  };
+
+  const clearVoice = () => {
+    setVoicePreview(null);
+    localStorage.removeItem('voicePreview');
+  };
+
+  const clearCharacter = (index) => {
+    const newPreviews = characterPreviews.filter((_, i) => i !== index);
+    setCharacterPreviews(newPreviews);
+  };
 
   const generateVideo = async () => {
-    setStatus('Generating...');
-    setProgress(0);
-    const interval = setInterval(() => setProgress(p => Math.min(p + 15, 90)), 800);
-
-    // Simulate generation
+    setStatus('Generating with Grok Imagine 1.5...');
+    // TODO: Connect real fetch to backend
     setTimeout(() => {
-      clearInterval(interval);
-      setProgress(100);
-      const url = 'https://example.com/generated-news.mp4';
-      setGeneratedVideoUrl(url);
-      setHistory([{ url, timestamp: new Date().toLocaleTimeString() }, ...history]);
-      setStatus('Complete!');
-    }, 3500);
+      setGeneratedVideoUrl('https://example.com/demo-news-video.mp4');
+      setStatus('Video ready! (demo)');
+    }, 2500);
+  };
+
+  const exportVideo = () => {
+    if (generatedVideoUrl) {
+      const a = document.createElement('a');
+      a.href = generatedVideoUrl;
+      a.download = 'grok-news-video.mp4';
+      a.click();
+    }
   };
 
   return (
-    <div style={{ padding: '20px', maxWidth: '1100px', margin: 'auto' }}>
-      <div style={{display:'flex', justifyContent:'space-between'}}>
+    <div style={{ padding: '15px', maxWidth: '100%', margin: 'auto', minHeight: '100vh' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
         <h1>📰 Grok Video Studio</h1>
-        <button onClick={() => setDarkMode(!darkMode)}>{darkMode ? '☀️' : '🌙'}</button>
+        <button onClick={toggleMode} style={{ padding: '8px 16px', borderRadius: '8px' }}>
+          {darkMode ? '☀️ Light' : '🌙 Dark'}
+        </button>
       </div>
 
-      {/* All previous fields + new ones */}
+      <input type="password" placeholder="xAI API Key (saved)" value={apiKey} onChange={e => setApiKey(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}} />
 
-      <h3>Multiple Character References</h3>
-      <input type="file" accept="image/*" onChange={e => {
-        const url = URL.createObjectURL(e.target.files[0]);
-        setCharacterPreviews([...characterPreviews, url]);
-      }} />
-      <div>
-        {characterPreviews.map((p, i) => <img key={i} src={p} style={{maxWidth:'100px', margin:'5px'}} />)}
+      <h3>Grok Voices</h3>
+      <select value={selectedVoice} onChange={e => setSelectedVoice(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
+        {grokVoices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+      </select>
+
+      <h3>Custom Voice Sample</h3>
+      <input type="file" accept="audio/*" onChange={handleVoice} />
+      {voicePreview && <p>Voice saved <button onClick={clearVoice}>Clear</button></p>}
+
+      <h3>Character References (Multiple)</h3>
+      <input type="file" accept="image/*" onChange={handleCharacter} />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', margin: '10px 0' }}>
+        {characterPreviews.map((p, i) => (
+          <div key={i}>
+            <img src={p} alt="char" style={{ maxWidth: '120px', borderRadius: '8px' }} />
+            <button onClick={() => clearCharacter(i)} style={{display:'block'}}>Remove</button>
+          </div>
+        ))}
       </div>
 
-      {/* Timeline with transition selector */}
+      <h3>Resolution</h3>
+      <select value={resolution} onChange={e => setResolution(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
+        {resolutions.map(r => <option key={r} value={r}>{r}</option>)}
+      </select>
 
-      <button onClick={generateVideo}>Generate</button>
+      <h3>Script</h3>
+      <textarea value={script} onChange={e => setScript(e.target.value)} rows="6" style={{width:'100%', padding:'12px', marginBottom:'15px'}} placeholder="Full news script..." />
+
+      <h3>Timeline - Stills</h3>
+      {scenes.map((s, i) => (
+        <div key={s.id} style={{ border: '1px solid #444', padding: '12px', margin: '10px 0', borderRadius: '8px' }}>
+          <input value={s.description} onChange={e => { const ns = [...scenes]; ns[i].description = e.target.value; setScenes(ns); }} placeholder="Description" style={{width:'70%'}} />
+          Start <input type="number" value={s.start} onChange={e => { const ns = [...scenes]; ns[i].start = +e.target.value; setScenes(ns); }} style={{width:'60px'}} />s 
+          Duration <input type="number" value={s.duration} onChange={e => { const ns = [...scenes]; ns[i].duration = +e.target.value; setScenes(ns); }} style={{width:'60px'}} />s
+        </div>
+      ))}
+      <button onClick={() => setScenes([...scenes, { id: Date.now(), description: "New still", start: scenes.length * 10, duration: 8 }])}>+ Add Still</button>
+
+      <br /><br />
+      <button onClick={generateVideo} style={{ padding: '18px 50px', fontSize: '1.3em', background: '#00ff9f', border: 'none', borderRadius: '12px' }}>Generate Video</button>
 
       {generatedVideoUrl && (
-        <div>
-          <video controls src={generatedVideoUrl} style={{width:'100%'}} />
-          <button onClick={() => { const a = document.createElement('a'); a.href = generatedVideoUrl; a.download = 'news-video.mp4'; a.click(); }}>Export MP4</button>
+        <div style={{ marginTop: '30px' }}>
+          <video controls src={generatedVideoUrl} style={{ width: '100%' }} />
+          <button onClick={exportVideo} style={{ marginTop: '10px', padding: '12px 30px' }}>Export MP4</button>
         </div>
       )}
 
-      {/* History list */}
-
-      <p>{status} {progress > 0 && progress < 100 && `(${progress}%)`}</p>
+      <p>{status}</p>
     </div>
   );
 }
