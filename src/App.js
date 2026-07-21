@@ -2,94 +2,75 @@ import React, { useState } from 'react';
 
 function App() {
   const [apiKey, setApiKey] = useState('');
+  const [backendUrl] = useState('https://your-railway-backend.up.railway.app'); // ← Change this
   const [script, setScript] = useState('');
   const [scenes, setScenes] = useState([
-    { id: 1, image: null, start: 0, duration: 10, description: "Anchor talking" }
+    { id: 1, description: "Anchor at desk", start: 0, duration: 12 }
   ]);
-  const [characterImage, setCharacterImage] = useState(null);
+  const [status, setStatus] = useState('');
 
   const addScene = () => {
-    setScenes([...scenes, { id: Date.now(), image: null, start: 15, duration: 8, description: "New scene" }]);
+    setScenes([...scenes, { id: Date.now(), description: "New still", start: 15, duration: 8 }]);
+  };
+
+  const generateVideo = async () => {
+    setStatus('Sending to backend...');
+    try {
+      const res = await fetch(`${backendUrl}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: script, api_key: apiKey, scenes })
+      });
+      const data = await res.json();
+      setStatus(`Job started! ID: ${data.job_id}`);
+    } catch (e) {
+      setStatus('Error connecting to backend. Check URL.');
+    }
   };
 
   return (
-    <div style={{ padding: '20px', maxWidth: '1000px', margin: 'auto', fontFamily: 'system-ui' }}>
-      <h1>📰 Grok Video Studio - News Edition</h1>
+    <div style={{ padding: '20px', maxWidth: '1000px', margin: 'auto' }}>
+      <h1>📰 Grok Video Studio</h1>
 
-      <div style={{ marginBottom: '20px' }}>
-        <input 
-          type="password" 
-          placeholder="xAI API Key" 
-          value={apiKey} 
-          onChange={(e) => setApiKey(e.target.value)}
-          style={{ width: '100%', padding: '12px', marginBottom: '10px' }}
-        />
-      </div>
+      <input 
+        type="password" 
+        placeholder="xAI API Key" 
+        value={apiKey} 
+        onChange={(e) => setApiKey(e.target.value)}
+        style={{ width: '100%', padding: '12px', margin: '10px 0' }}
+      />
 
-      {/* Character Reference */}
-      <div style={{ marginBottom: '20px' }}>
-        <h3>Consistent Character (Anchor)</h3>
-        <input type="file" accept="image/*" onChange={(e) => setCharacterImage(e.target.files[0])} />
-      </div>
+      <textarea 
+        value={script} 
+        onChange={(e) => setScript(e.target.value)}
+        placeholder="Full news script..."
+        rows="8" 
+        style={{ width: '100%', padding: '12px' }}
+      />
 
-      {/* Script */}
-      <div style={{ marginBottom: '20px' }}>
-        <h3>Full Script / Narration</h3>
-        <textarea 
-          value={script} 
-          onChange={(e) => setScript(e.target.value)}
-          placeholder="Write your full news script here..."
-          rows="6" 
-          style={{ width: '100%', padding: '12px' }}
-        />
-      </div>
+      <h3>Timeline - Stills</h3>
+      {scenes.map((s, i) => (
+        <div key={s.id} style={{ border: '1px solid #ddd', padding: '10px', margin: '10px 0' }}>
+          <input value={s.description} onChange={(e) => {
+            const ns = [...scenes];
+            ns[i].description = e.target.value;
+            setScenes(ns);
+          }} />
+          <div>Start: <input type="number" value={s.start} onChange={(e) => {
+            const ns = [...scenes]; ns[i].start = +e.target.value; setScenes(ns);
+          }} />s Duration: <input type="number" value={s.duration} onChange={(e) => {
+            const ns = [...scenes]; ns[i].duration = +e.target.value; setScenes(ns);
+          }} />s</div>
+        </div>
+      ))}
+      <button onClick={addScene}>+ Add Still</button>
 
-      {/* Timeline / Scenes */}
-      <div style={{ marginBottom: '30px' }}>
-        <h3>Timeline - Add Stills & Durations</h3>
-        {scenes.map((scene, index) => (
-          <div key={scene.id} style={{ border: '1px solid #ccc', padding: '15px', marginBottom: '10px', borderRadius: '8px' }}>
-            <input 
-              type="text" 
-              placeholder="Scene description" 
-              value={scene.description} 
-              onChange={(e) => {
-                const newScenes = [...scenes];
-                newScenes[index].description = e.target.value;
-                setScenes(newScenes);
-              }}
-            />
-            <input type="file" accept="image/*" onChange={(e) => {
-              const newScenes = [...scenes];
-              newScenes[index].image = e.target.files[0];
-              setScenes(newScenes);
-            }} />
-            <div>
-              Start: <input type="number" value={scene.start} onChange={(e) => {
-                const newScenes = [...scenes];
-                newScenes[index].start = parseInt(e.target.value);
-                setScenes(newScenes);
-              }} /> s
-            </div>
-            <div>
-              Duration: <input type="number" value={scene.duration} onChange={(e) => {
-                const newScenes = [...scenes];
-                newScenes[index].duration = parseInt(e.target.value);
-                setScenes(newScenes);
-              }} /> s
-            </div>
-          </div>
-        ))}
-        <button onClick={addScene}>+ Add Still / Scene</button>
-      </div>
-
-      <button style={{ padding: '18px 50px', fontSize: '1.3em', background: '#00ff9f', color: '#000', border: 'none', borderRadius: '12px', cursor: 'pointer' }}>
-        Generate Full Video with Grok Imagine 1.5
+      <br /><br />
+      <button onClick={generateVideo} style={{ padding: '18px 60px', fontSize: '1.3em', background: '#00ff9f' }}>
+        Generate Video
       </button>
 
-      <p style={{ marginTop: '30px', fontSize: '0.9em' }}>
-        After generation, you'll be able to edit like CapCut (trim, text, transitions). Voice cloning coming in backend update.
-      </p>
+      <p>{status}</p>
     </div>
   );
 }
