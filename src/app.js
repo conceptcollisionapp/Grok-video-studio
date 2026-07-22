@@ -187,8 +187,8 @@ function App() {
         {resolutions.map(r => <option key={r} value={r}>{r}</option>)}
       </select>
 
-      <h3>Overall Notes (optional)</h3>
-      <textarea value={script} onChange={e => setScript(e.target.value)} rows="3" style={{width:'100%', padding:'12px', marginBottom:'15px'}} placeholder="Optional notes — narration now comes from each scene's dialogue below." />
+      <h3>Full Script / Notes</h3>
+      <textarea value={script} onChange={e => setScript(e.target.value)} rows="14" style={{width:'100%', padding:'12px', marginBottom:'15px', minHeight:'260px', boxSizing:'border-box', resize:'vertical', fontFamily:'inherit', lineHeight:'1.5'}} placeholder="Paste your full script here, then break it into each scene's dialogue below. (Narration is generated from the per-scene dialogue.)" />
 
       <h3>Timeline — Scenes (dialogue, image & timing)</h3>
       {scenes.map((s, i) => (
@@ -207,8 +207,8 @@ function App() {
           <textarea
             value={s.dialogue || ''}
             onChange={e => { const ns = [...scenes]; ns[i].dialogue = e.target.value; setScenes(ns); }}
-            rows="2"
-            style={{ width: '100%', padding: '8px', margin: '6px 0' }}
+            rows="5"
+            style={{ width: '100%', padding: '10px', margin: '6px 0', minHeight: '110px', boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5' }}
             placeholder="Spoken line for this scene (part of the continuous narration)"
           />
 
