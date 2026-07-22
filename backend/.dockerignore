@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+static/
+work/
+nixpacks.toml
