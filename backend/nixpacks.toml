@@ -3,11 +3,12 @@
 # concat, overlay narration), so ffmpeg MUST be installed at build time —
 # installing it locally via winget does nothing for the deployed container.
 #
-# aptPkgs is additive: it appends to the base image's setup phase without
-# overriding Nixpacks' auto-detected Python packages or the start command.
-# The Debian `ffmpeg` package provides both `ffmpeg` and `ffprobe`.
+# Install ffmpeg as a Nix package. The "..." token is a Nixpacks spread that
+# expands to the auto-detected packages (Python, pip, etc.), so appending
+# "ffmpeg" ADDS to that set instead of replacing it. The nixpkgs `ffmpeg`
+# derivation provides both `ffmpeg` and `ffprobe`.
 [phases.setup]
-aptPkgs = ["ffmpeg"]
+nixPkgs = ["...", "ffmpeg"]
 
 # Pin the start command in-repo instead of relying on the Railway dashboard.
 # Railway injects $PORT at runtime; bind 0.0.0.0 so the container is reachable.
