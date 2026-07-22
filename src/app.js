@@ -7,33 +7,38 @@ function App() {
   });
 
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('xaiKey') || '');
+  const [replicateApiKey, setReplicateApiKey] = useState(() => localStorage.getItem('replicateKey') || '');
   const [backendUrl] = useState('https://grok-video-studio-production.up.railway.app');
   const [script, setScript] = useState(() => localStorage.getItem('script') || '');
   const [voicePreview, setVoicePreview] = useState(() => localStorage.getItem('voicePreview') || null);
   const [characterPreviews, setCharacterPreviews] = useState(() => JSON.parse(localStorage.getItem('characterPreviews') || '[]'));
-  const [selectedVoice, setSelectedVoice] = useState('default');
+  const [selectedVoice, setSelectedVoice] = useState(() => localStorage.getItem('voiceId') || 'ara');
   const [resolution, setResolution] = useState(() => localStorage.getItem('resolution') || '720p');
-  const [scenes, setScenes] = useState(() => JSON.parse(localStorage.getItem('scenes') || '[{"id":1,"description":"News Anchor","start":0,"duration":12,"end":12,"image":null}]'));
+  const [scenes, setScenes] = useState(() => JSON.parse(localStorage.getItem('scenes') || '[{"id":1,"description":"News Anchor","dialogue":"","isCharacterScene":true,"start":0,"duration":12,"end":12,"image":null,"imageUrl":""}]'));
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState('');
   const [status, setStatus] = useState('');
 
+  // Real xAI TTS voice IDs (source: xAI TTS docs / GET /v1/tts/voices)
   const grokVoices = [
-    { id: 'default', name: 'Default Grok' },
-    { id: 'male-news', name: 'Professional Male Anchor' },
-    { id: 'female-clear', name: 'Clear Female Narrator' },
-    { id: 'energetic', name: 'Energetic' }
+    { id: 'ara', name: 'Ara — warm & conversational' },
+    { id: 'eve', name: 'Eve — energetic & upbeat (default)' },
+    { id: 'leo', name: 'Leo — authoritative & strong' },
+    { id: 'rex', name: 'Rex — clear & professional' },
+    { id: 'sal', name: 'Sal — smooth & balanced' }
   ];
 
   const resolutions = ['480p', '720p', '1080p'];
 
   useEffect(() => {
     localStorage.setItem('xaiKey', apiKey);
+    localStorage.setItem('replicateKey', replicateApiKey);
     localStorage.setItem('darkMode', darkMode);
     localStorage.setItem('characterPreviews', JSON.stringify(characterPreviews));
     localStorage.setItem('script', script);
+    localStorage.setItem('voiceId', selectedVoice);
     localStorage.setItem('resolution', resolution);
     localStorage.setItem('scenes', JSON.stringify(scenes));
-  }, [apiKey, darkMode, characterPreviews, script, resolution, scenes]);
+  }, [apiKey, replicateApiKey, darkMode, characterPreviews, script, selectedVoice, resolution, scenes]);
 
   useEffect(() => {
     document.documentElement.style.backgroundColor = darkMode ? '#0f0f0f' : '#f8f9fa';
@@ -83,13 +88,38 @@ function App() {
       setStatus("Please enter your xAI API Key");
       return;
     }
+
+    // Lip-sync scenes require a Replicate key — block before submitting.
+    const hasCharacterScene = scenes.some(s => s.isCharacterScene);
+    if (hasCharacterScene && !replicateApiKey) {
+      setStatus("Replicate API key required for character lip-sync scenes.");
+      return;
+    }
+
     setStatus('Sending to backend...');
 
+    // One continuous narration track = every scene's dialogue joined in order.
+    const fullScript = scenes
+      .map(s => (s.dialogue || '').trim())
+      .filter(Boolean)
+      .join(' ');
+
+    // Per-scene payload the backend needs for the pipeline.
+    const scenePayload = scenes.map(s => ({
+      image_url: s.imageUrl || s.image || '',
+      dialogue: s.dialogue || '',
+      duration: s.duration || 8,
+      isCharacterScene: !!s.isCharacterScene
+    }));
+
     const formData = new FormData();
-    formData.append('prompt', script || 'A news anchor delivering a report with graphs');
+    formData.append('script', fullScript || script || 'A news anchor delivering a report with graphs');
     formData.append('api_key', apiKey);
+    formData.append('replicate_api_key', replicateApiKey);
+    formData.append('scenes', JSON.stringify(scenePayload));
     formData.append('voice_id', selectedVoice);
     formData.append('resolution', resolution);
+    formData.append('character_reference_urls', JSON.stringify(characterPreviews));
 
     try {
       const res = await fetch(`${backendUrl}/generate`, {
@@ -129,9 +159,10 @@ function App() {
         </button>
       </div>
 
-      <input type="password" placeholder="xAI API Key (saved)" value={apiKey} onChange={e => setApiKey(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}} />
+      <input type="password" placeholder="xAI API Key (saved)" value={apiKey} onChange={e => setApiKey(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px', boxSizing:'border-box'}} />
+      <input type="password" placeholder="Replicate API Key (saved)" value={replicateApiKey} onChange={e => setReplicateApiKey(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px', boxSizing:'border-box'}} />
 
-      <h3>Grok Voices</h3>
+      <h3>Grok Voices (TTS narration)</h3>
       <select value={selectedVoice} onChange={e => setSelectedVoice(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
         {grokVoices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
       </select>
@@ -156,44 +187,68 @@ function App() {
         {resolutions.map(r => <option key={r} value={r}>{r}</option>)}
       </select>
 
-      <h3>Script</h3>
-      <textarea value={script} onChange={e => setScript(e.target.value)} rows="6" style={{width:'100%', padding:'12px', marginBottom:'15px'}} placeholder="Full news script..." />
+      <h3>Overall Notes (optional)</h3>
+      <textarea value={script} onChange={e => setScript(e.target.value)} rows="3" style={{width:'100%', padding:'12px', marginBottom:'15px'}} placeholder="Optional notes — narration now comes from each scene's dialogue below." />
 
-      <h3>Timeline - Stills (with images & End Time)</h3>
+      <h3>Timeline — Scenes (dialogue, image & timing)</h3>
       {scenes.map((s, i) => (
         <div key={s.id} style={{ border: '1px solid #444', padding: '12px', margin: '10px 0', borderRadius: '8px' }}>
           <input value={s.description} onChange={e => { const ns = [...scenes]; ns[i].description = e.target.value; setScenes(ns); }} placeholder="Description" style={{width:'70%'}} />
+
+          <label style={{ display: 'block', margin: '8px 0' }}>
+            <input
+              type="checkbox"
+              checked={!!s.isCharacterScene}
+              onChange={e => { const ns = [...scenes]; ns[i].isCharacterScene = e.target.checked; setScenes(ns); }}
+            />{' '}
+            {s.isCharacterScene ? 'Character speaking (lip-sync)' : 'B-roll / graphic (pan & zoom only)'}
+          </label>
+
+          <textarea
+            value={s.dialogue || ''}
+            onChange={e => { const ns = [...scenes]; ns[i].dialogue = e.target.value; setScenes(ns); }}
+            rows="2"
+            style={{ width: '100%', padding: '8px', margin: '6px 0' }}
+            placeholder="Spoken line for this scene (part of the continuous narration)"
+          />
+
+          <input
+            value={s.imageUrl || ''}
+            onChange={e => { const ns = [...scenes]; ns[i].imageUrl = e.target.value; setScenes(ns); }}
+            placeholder="Public image URL (used by the pipeline)"
+            style={{ width: '100%', padding: '8px', margin: '6px 0' }}
+          />
           <input type="file" accept="image/*" onChange={e => updateSceneImage(i, e.target.files[0])} />
           {s.image && <img src={s.image} alt="still" style={{ maxWidth: '150px', margin: '5px 0', display: 'block' }} />}
-          
-          Start <input type="number" value={s.start} onChange={e => { 
-            const ns = [...scenes]; 
-            ns[i].start = +e.target.value; 
-            ns[i].end = ns[i].start + (ns[i].duration || 8); 
-            setScenes(ns); 
-          }} style={{width:'60px'}} />s 
 
-          End <input type="number" value={s.end || (s.start + s.duration)} onChange={e => { 
-            const ns = [...scenes]; 
-            ns[i].end = +e.target.value; 
-            ns[i].duration = ns[i].end - ns[i].start; 
-            setScenes(ns); 
-          }} style={{width:'60px'}} />s 
-
-          Duration <input type="number" value={s.duration} onChange={e => { 
-            const ns = [...scenes]; 
-            ns[i].duration = +e.target.value; 
-            ns[i].end = ns[i].start + ns[i].duration; 
-            setScenes(ns); 
+          Start <input type="number" value={s.start} onChange={e => {
+            const ns = [...scenes];
+            ns[i].start = +e.target.value;
+            ns[i].end = ns[i].start + (ns[i].duration || 8);
+            setScenes(ns);
           }} style={{width:'60px'}} />s
 
-          <button onClick={() => setScenes(scenes.filter((_, idx) => idx !== i))} style={{marginTop: '8px'}}>Delete Still</button>
+          End <input type="number" value={s.end || (s.start + s.duration)} onChange={e => {
+            const ns = [...scenes];
+            ns[i].end = +e.target.value;
+            ns[i].duration = ns[i].end - ns[i].start;
+            setScenes(ns);
+          }} style={{width:'60px'}} />s
+
+          Duration <input type="number" value={s.duration} onChange={e => {
+            const ns = [...scenes];
+            ns[i].duration = +e.target.value;
+            ns[i].end = ns[i].start + ns[i].duration;
+            setScenes(ns);
+          }} style={{width:'60px'}} />s
+
+          <button onClick={() => setScenes(scenes.filter((_, idx) => idx !== i))} style={{marginTop: '8px'}}>Delete Scene</button>
         </div>
       ))}
       <button onClick={() => {
         const lastEnd = scenes.length > 0 ? scenes[scenes.length - 1].end || (scenes[scenes.length - 1].start + scenes[scenes.length - 1].duration) : 0;
-        setScenes([...scenes, { id: Date.now(), description: "New still", start: lastEnd, duration: 8, end: lastEnd + 8, image: null }]);
-      }}>+ Add Still</button>
+        setScenes([...scenes, { id: Date.now(), description: "New scene", dialogue: '', isCharacterScene: false, start: lastEnd, duration: 8, end: lastEnd + 8, image: null, imageUrl: '' }]);
+      }}>+ Add Scene</button>
 
       <br /><br />
       <button onClick={generateVideo} style={{ padding: '18px 50px', fontSize: '1.3em', background: '#00ff9f', border: 'none', borderRadius: '12px' }}>Generate Video</button>

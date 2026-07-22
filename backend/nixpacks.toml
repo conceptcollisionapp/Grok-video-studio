@@ -1,0 +1,15 @@
+# Railway builds this backend with Nixpacks, and the container starts clean.
+# The /generate pipeline shells out to ffmpeg/ffprobe (strip audio, trim,
+# concat, overlay narration), so ffmpeg MUST be installed at build time —
+# installing it locally via winget does nothing for the deployed container.
+#
+# aptPkgs is additive: it appends to the base image's setup phase without
+# overriding Nixpacks' auto-detected Python packages or the start command.
+# The Debian `ffmpeg` package provides both `ffmpeg` and `ffprobe`.
+[phases.setup]
+aptPkgs = ["ffmpeg"]
+
+# Pin the start command in-repo instead of relying on the Railway dashboard.
+# Railway injects $PORT at runtime; bind 0.0.0.0 so the container is reachable.
+[start]
+cmd = "uvicorn main:app --host 0.0.0.0 --port $PORT"
