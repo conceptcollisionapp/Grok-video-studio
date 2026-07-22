@@ -74,12 +74,38 @@ function App() {
     setCharacterPreviews(newPreviews);
   };
 
-  const updateSceneImage = (index, file) => {
-    if (file) {
-      const url = URL.createObjectURL(file);
-      const ns = [...scenes];
-      ns[index].image = url;
-      setScenes(ns);
+  const uploadFile = async (file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(`${backendUrl}/upload`, { method: 'POST', body: fd });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.url) {
+      throw new Error(data.message || `Upload failed (${res.status})`);
+    }
+    return data.url;
+  };
+
+  const updateSceneImage = async (index, file) => {
+    if (!file) return;
+    const sceneId = scenes[index] && scenes[index].id;
+    const preview = URL.createObjectURL(file);
+
+    // Show the local blob preview instantly, mark the scene as uploading.
+    setScenes(prev => prev.map(s =>
+      s.id === sceneId ? { ...s, imagePreview: preview, uploading: true, uploadError: '' } : s
+    ));
+
+    try {
+      // Store the REAL public URL (this is what gets sent to /generate).
+      const publicUrl = await uploadFile(file);
+      setScenes(prev => prev.map(s =>
+        s.id === sceneId ? { ...s, image: publicUrl, uploading: false } : s
+      ));
+    } catch (e) {
+      setScenes(prev => prev.map(s =>
+        s.id === sceneId ? { ...s, uploading: false, uploadError: e.message } : s
+      ));
+      setStatus('Scene image upload failed: ' + e.message);
     }
   };
 
@@ -93,6 +119,21 @@ function App() {
     const hasCharacterScene = scenes.some(s => s.isCharacterScene);
     if (hasCharacterScene && !replicateApiKey) {
       setStatus("Replicate API key required for character lip-sync scenes.");
+      return;
+    }
+
+    // Never submit while an upload is in flight or with a blob: URL — xAI can
+    // only fetch the real public URLs returned by /upload.
+    if (scenes.some(s => s.uploading)) {
+      setStatus('Please wait — a scene image is still uploading.');
+      return;
+    }
+    const badIdx = scenes.findIndex(s => {
+      const url = s.imageUrl || s.image || '';
+      return !url || url.startsWith('blob:');
+    });
+    if (badIdx !== -1) {
+      setStatus(`Scene ${badIdx + 1} needs an uploaded image or a public image URL.`);
       return;
     }
 
@@ -215,11 +256,14 @@ function App() {
           <input
             value={s.imageUrl || ''}
             onChange={e => { const ns = [...scenes]; ns[i].imageUrl = e.target.value; setScenes(ns); }}
-            placeholder="Public image URL (used by the pipeline)"
+            placeholder="Or paste a public image URL (overrides upload)"
             style={{ width: '100%', padding: '8px', margin: '6px 0' }}
           />
           <input type="file" accept="image/*" onChange={e => updateSceneImage(i, e.target.files[0])} />
-          {s.image && <img src={s.image} alt="still" style={{ maxWidth: '150px', margin: '5px 0', display: 'block' }} />}
+          {s.uploading && <span style={{ marginLeft: '10px' }}>⏳ Uploading…</span>}
+          {!s.uploading && s.image && !s.uploadError && <span style={{ marginLeft: '10px' }}>✅ Uploaded</span>}
+          {s.uploadError && <span style={{ marginLeft: '10px', color: '#ff6b6b' }}>⚠️ {s.uploadError}</span>}
+          {(s.imagePreview || s.image) && <img src={s.imagePreview || s.image} alt="still" style={{ maxWidth: '150px', margin: '5px 0', display: 'block' }} />}
 
           Start <input type="number" value={s.start} onChange={e => {
             const ns = [...scenes];

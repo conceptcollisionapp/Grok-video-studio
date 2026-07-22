@@ -24,4 +24,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Railway injects $PORT at runtime; bind 0.0.0.0 so the container is reachable.
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# --proxy-headers + trusting forwarded IPs makes request.base_url reflect the
+# real public https:// host (Railway terminates TLS at its proxy), so the URLs
+# returned by /upload and /generate are publicly fetchable by xAI.
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips=*"]

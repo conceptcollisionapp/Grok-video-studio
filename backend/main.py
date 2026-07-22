@@ -27,7 +27,7 @@ import uuid
 
 import requests
 import replicate
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -307,6 +307,37 @@ async def root():
         "ffmpeg": bool(FFMPEG),
         "ffprobe": bool(FFPROBE),
     }
+
+
+ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+
+
+@app.post("/upload")
+async def upload(request: Request, file: UploadFile = File(...)):
+    """Store an uploaded image under /static and return its public URL.
+
+    The frontend calls this on scene-image selection so /generate receives a
+    real, publicly reachable URL (xAI's servers cannot fetch a browser blob:).
+    """
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_IMAGE_EXTS:
+        return JSONResponse(
+            {"status": "error",
+             "message": f"Unsupported image type '{ext}'. Allowed: "
+                        f"{', '.join(sorted(ALLOWED_IMAGE_EXTS))}"},
+            status_code=400,
+        )
+
+    name = f"upload_{uuid.uuid4().hex}{ext}"
+    dst = os.path.join(STATIC_DIR, name)
+    try:
+        with open(dst, "wb") as fh:
+            shutil.copyfileobj(file.file, fh)
+    finally:
+        file.file.close()
+
+    base = str(request.base_url).rstrip("/")
+    return {"status": "success", "url": f"{base}/static/{name}", "filename": name}
 
 
 @app.post("/generate")
