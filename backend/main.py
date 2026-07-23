@@ -103,6 +103,7 @@ S3_PREFIX = os.environ.get("S3_PREFIX", "uploads").strip().strip("/")
 # If the bucket/objects are public (or fronted by CloudFront/a custom domain),
 # set S3_PUBLIC_BASE_URL to get stable, non-expiring URLs. Otherwise we return
 # a presigned GET URL that works against a private bucket (valid up to 7 days).
+S3_OUTPUT_PREFIX = os.environ.get("S3_OUTPUT_PREFIX", "outputs").strip().strip("/")
 S3_PUBLIC_BASE_URL = os.environ.get("S3_PUBLIC_BASE_URL", "").strip()
 S3_URL_EXPIRY = int(os.environ.get("S3_URL_EXPIRY", "604800"))  # 7d = SigV4 max
 
@@ -121,10 +122,9 @@ def _get_s3():
     return _s3_client
 
 
-def store_upload_s3(fileobj, name, content_type):
-    """Upload a file object to S3 and return a fetchable URL (stable if a public
-    base is configured, otherwise a presigned GET URL)."""
-    key = f"{S3_PREFIX}/{name}" if S3_PREFIX else name
+def _s3_put(fileobj, key, content_type):
+    """Upload a file object to S3 under `key` and return a fetchable URL (stable
+    if a public base is configured, otherwise a presigned GET URL)."""
     client = _get_s3()
     client.upload_fileobj(
         fileobj, S3_BUCKET, key, ExtraArgs={"ContentType": content_type}
@@ -135,6 +135,18 @@ def store_upload_s3(fileobj, name, content_type):
         "get_object",
         Params={"Bucket": S3_BUCKET, "Key": key},
         ExpiresIn=S3_URL_EXPIRY,
+    )
+
+
+def store_upload_s3(fileobj, name, content_type):
+    """Store a user-uploaded image under the uploads prefix."""
+    return _s3_put(fileobj, f"{S3_PREFIX}/{name}" if S3_PREFIX else name, content_type)
+
+
+def store_output_s3(fileobj, name, content_type):
+    """Store a generated video under the outputs prefix."""
+    return _s3_put(
+        fileobj, f"{S3_OUTPUT_PREFIX}/{name}" if S3_OUTPUT_PREFIX else name, content_type
     )
 
 
@@ -500,15 +512,26 @@ def generate(
         concat_clips(final_clips, combined_silent)
 
         final_name = f"{job_id}.mp4"
-        final_path = os.path.join(STATIC_DIR, final_name)
-        overlay_audio(combined_silent, narration, final_path)
+        if s3_enabled():
+            # Render into work dir, upload to S3 (durable), let finally clean up.
+            final_path = os.path.join(job_work, final_name)
+            overlay_audio(combined_silent, narration, final_path)
+            with open(final_path, "rb") as fh:
+                video_url = store_output_s3(fh, final_name, "video/mp4")
+            storage = "s3"
+        else:
+            # Ephemeral: served from /static until the container restarts.
+            final_path = os.path.join(STATIC_DIR, final_name)
+            overlay_audio(combined_silent, narration, final_path)
+            video_url = f"{str(request.base_url).rstrip('/')}/static/{final_name}"
+            storage = "local"
 
         # --- 5. respond ---------------------------------------------------- #
-        base = str(request.base_url).rstrip("/")
         return JSONResponse({
             "job_id": job_id,
             "status": "success",
-            "video_url": f"{base}/static/{final_name}",
+            "video_url": video_url,
+            "storage": storage,
             "narration_seconds": round(narration_len, 2),
             "scene_count": len(scene_list),
             "message": "Video generated with continuous narration + lip-sync",
@@ -525,5 +548,7 @@ def generate(
             status_code=500,
         )
     finally:
-        # keep /static output, drop intermediate work
+        # Drop intermediate work. In local mode the final video lives in
+        # /static (outside job_work) and survives; in S3 mode it's already
+        # uploaded, so removing the work dir is safe.
         shutil.rmtree(job_work, ignore_errors=True)
