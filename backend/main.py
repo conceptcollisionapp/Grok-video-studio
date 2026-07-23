@@ -41,6 +41,11 @@ logger = logging.getLogger("uvicorn.error")
 @asynccontextmanager
 async def lifespan(_app):
     # One-time startup banner: makes the active storage mode obvious per deploy.
+    if s3_enabled():
+        try:
+            _get_s3()  # warm client + resolve real bucket region for the log
+        except Exception as e:  # noqa: BLE001 - never block startup on S3
+            logger.warning("S3 client warmup failed: %s", e)
     summary = _storage_summary()
     if summary["mode"] == "s3":
         logger.info(
@@ -130,17 +135,45 @@ S3_PUBLIC_BASE_URL = os.environ.get("S3_PUBLIC_BASE_URL", "").strip()
 S3_URL_EXPIRY = int(os.environ.get("S3_URL_EXPIRY", "604800"))  # 7d = SigV4 max
 
 _s3_client = None
+_s3_region_resolved = None
 
 
 def s3_enabled():
     return bool(S3_BUCKET)
 
 
+def _detect_bucket_region():
+    """Return the bucket's real region. S3 echoes `x-amz-bucket-region` in the
+    response headers even on a 301/403, so this works with only Put/Get perms
+    and self-corrects a wrong AWS_REGION."""
+    import boto3
+    from botocore.config import Config
+
+    probe = boto3.client(
+        "s3", region_name=S3_REGION or "us-east-1",
+        config=Config(signature_version="s3v4"),
+    )
+    try:
+        resp = probe.head_bucket(Bucket=S3_BUCKET)
+        hdrs = resp["ResponseMetadata"]["HTTPHeaders"]
+    except Exception as e:  # noqa: BLE001 - region header is present even on error
+        hdrs = getattr(e, "response", {}).get("ResponseMetadata", {}).get("HTTPHeaders", {})
+    return hdrs.get("x-amz-bucket-region")
+
+
 def _get_s3():
-    global _s3_client
+    global _s3_client, _s3_region_resolved
     if _s3_client is None:
         import boto3  # lazy: only needed when S3 is configured
-        _s3_client = boto3.client("s3", region_name=S3_REGION or None)
+        from botocore.config import Config
+
+        # Sign the bucket's actual region with SigV4 (required by regions created
+        # after 2014, e.g. us-east-2; also accepted everywhere else).
+        _s3_region_resolved = _detect_bucket_region() or S3_REGION or "us-east-1"
+        _s3_client = boto3.client(
+            "s3", region_name=_s3_region_resolved,
+            config=Config(signature_version="s3v4"),
+        )
     return _s3_client
 
 
@@ -179,7 +212,7 @@ def _storage_summary():
         return {
             "mode": "s3",
             "bucket": S3_BUCKET,
-            "region": S3_REGION or "default",
+            "region": _s3_region_resolved or S3_REGION or "default",
             "uploads_prefix": f"{S3_PREFIX}/" if S3_PREFIX else "(root)",
             "outputs_prefix": f"{S3_OUTPUT_PREFIX}/" if S3_OUTPUT_PREFIX else "(root)",
             "url_mode": "public" if S3_PUBLIC_BASE_URL else "presigned",
