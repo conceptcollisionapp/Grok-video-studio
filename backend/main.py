@@ -19,11 +19,13 @@ Every external call below is based on real, current docs:
 """
 
 import json
+import logging
 import os
 import shutil
 import subprocess
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 import requests
 import replicate
@@ -32,7 +34,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-app = FastAPI(title="Grok Video Backend")
+# Log through uvicorn's logger so lines show up in Railway's deploy logs.
+logger = logging.getLogger("uvicorn.error")
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    # One-time startup banner: makes the active storage mode obvious per deploy.
+    summary = _storage_summary()
+    if summary["mode"] == "s3":
+        logger.info(
+            "Storage: S3 bucket=%s region=%s uploads=%s outputs=%s urls=%s",
+            summary["bucket"], summary["region"],
+            summary["uploads_prefix"], summary["outputs_prefix"], summary["url_mode"],
+        )
+    else:
+        logger.info("Storage: LOCAL /static (ephemeral — set S3_BUCKET to persist)")
+    logger.info("Media tools: ffmpeg=%s ffprobe=%s", bool(FFMPEG), bool(FFPROBE))
+    yield
+
+
+app = FastAPI(title="Grok Video Backend", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -148,6 +170,26 @@ def store_output_s3(fileobj, name, content_type):
     return _s3_put(
         fileobj, f"{S3_OUTPUT_PREFIX}/{name}" if S3_OUTPUT_PREFIX else name, content_type
     )
+
+
+def _storage_summary():
+    """Describe the active storage backend — used by both the startup log and
+    the /health route so the mode + prefixes are always visible."""
+    if s3_enabled():
+        return {
+            "mode": "s3",
+            "bucket": S3_BUCKET,
+            "region": S3_REGION or "default",
+            "uploads_prefix": f"{S3_PREFIX}/" if S3_PREFIX else "(root)",
+            "outputs_prefix": f"{S3_OUTPUT_PREFIX}/" if S3_OUTPUT_PREFIX else "(root)",
+            "url_mode": "public" if S3_PUBLIC_BASE_URL else "presigned",
+            "presigned_expiry_seconds": None if S3_PUBLIC_BASE_URL else S3_URL_EXPIRY,
+            "public_base_url": S3_PUBLIC_BASE_URL or None,
+        }
+    return {
+        "mode": "local",
+        "note": "ephemeral /static — set S3_BUCKET to persist across redeploys",
+    }
 
 
 class PipelineError(Exception):
@@ -359,12 +401,14 @@ def _download(url, dst):
 # Routes
 # --------------------------------------------------------------------------- #
 @app.get("/")
+@app.get("/health")
 async def root():
     return {
         "status": "Grok Video Backend is running!",
         "ffmpeg": bool(FFMPEG),
         "ffprobe": bool(FFPROBE),
         "s3": s3_enabled(),
+        "storage": _storage_summary(),
     }
 
 
