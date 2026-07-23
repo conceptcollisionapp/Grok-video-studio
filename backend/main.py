@@ -91,6 +91,52 @@ RESOLUTION_DIMS = {
     "1080p": (1920, 1080),
 }
 
+# --------------------------------------------------------------------------- #
+# Optional S3 storage for uploads (durable — survives Railway redeploys).
+# Enabled only when S3_BUCKET is set; otherwise uploads fall back to local
+# /static (ephemeral). Credentials come from the standard AWS env vars
+# (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION), set on Railway.
+# --------------------------------------------------------------------------- #
+S3_BUCKET = os.environ.get("S3_BUCKET", "").strip()
+S3_REGION = (os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "").strip()
+S3_PREFIX = os.environ.get("S3_PREFIX", "uploads").strip().strip("/")
+# If the bucket/objects are public (or fronted by CloudFront/a custom domain),
+# set S3_PUBLIC_BASE_URL to get stable, non-expiring URLs. Otherwise we return
+# a presigned GET URL that works against a private bucket (valid up to 7 days).
+S3_PUBLIC_BASE_URL = os.environ.get("S3_PUBLIC_BASE_URL", "").strip()
+S3_URL_EXPIRY = int(os.environ.get("S3_URL_EXPIRY", "604800"))  # 7d = SigV4 max
+
+_s3_client = None
+
+
+def s3_enabled():
+    return bool(S3_BUCKET)
+
+
+def _get_s3():
+    global _s3_client
+    if _s3_client is None:
+        import boto3  # lazy: only needed when S3 is configured
+        _s3_client = boto3.client("s3", region_name=S3_REGION or None)
+    return _s3_client
+
+
+def store_upload_s3(fileobj, name, content_type):
+    """Upload a file object to S3 and return a fetchable URL (stable if a public
+    base is configured, otherwise a presigned GET URL)."""
+    key = f"{S3_PREFIX}/{name}" if S3_PREFIX else name
+    client = _get_s3()
+    client.upload_fileobj(
+        fileobj, S3_BUCKET, key, ExtraArgs={"ContentType": content_type}
+    )
+    if S3_PUBLIC_BASE_URL:
+        return f"{S3_PUBLIC_BASE_URL.rstrip('/')}/{key}"
+    return client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": S3_BUCKET, "Key": key},
+        ExpiresIn=S3_URL_EXPIRY,
+    )
+
 
 class PipelineError(Exception):
     """Raised for any user-facing failure; carries an HTTP status code."""
@@ -306,18 +352,24 @@ async def root():
         "status": "Grok Video Backend is running!",
         "ffmpeg": bool(FFMPEG),
         "ffprobe": bool(FFPROBE),
+        "s3": s3_enabled(),
     }
 
 
 ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+MIME_BY_EXT = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp",
+}
 
 
 @app.post("/upload")
-async def upload(request: Request, file: UploadFile = File(...)):
-    """Store an uploaded image under /static and return its public URL.
+def upload(request: Request, file: UploadFile = File(...)):
+    """Store an uploaded image and return a publicly fetchable URL.
 
-    The frontend calls this on scene-image selection so /generate receives a
-    real, publicly reachable URL (xAI's servers cannot fetch a browser blob:).
+    Uses S3 when configured (durable, survives redeploys); otherwise falls back
+    to local /static (ephemeral). The frontend calls this on scene-image
+    selection so /generate receives a real URL — xAI cannot fetch browser blob:.
     """
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_IMAGE_EXTS:
@@ -329,15 +381,26 @@ async def upload(request: Request, file: UploadFile = File(...)):
         )
 
     name = f"upload_{uuid.uuid4().hex}{ext}"
-    dst = os.path.join(STATIC_DIR, name)
+    content_type = MIME_BY_EXT.get(ext, "application/octet-stream")
     try:
-        with open(dst, "wb") as fh:
-            shutil.copyfileobj(file.file, fh)
+        if s3_enabled():
+            url = store_upload_s3(file.file, name, content_type)
+            storage = "s3"
+        else:
+            dst = os.path.join(STATIC_DIR, name)
+            with open(dst, "wb") as fh:
+                shutil.copyfileobj(file.file, fh)
+            url = f"{str(request.base_url).rstrip('/')}/static/{name}"
+            storage = "local"
+    except Exception as e:  # noqa: BLE001 - surface storage failures clearly
+        return JSONResponse(
+            {"status": "error", "message": f"Upload storage failed: {e}"},
+            status_code=502,
+        )
     finally:
         file.file.close()
 
-    base = str(request.base_url).rstrip("/")
-    return {"status": "success", "url": f"{base}/static/{name}", "filename": name}
+    return {"status": "success", "url": url, "filename": name, "storage": storage}
 
 
 @app.post("/generate")
