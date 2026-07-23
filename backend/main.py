@@ -170,9 +170,15 @@ def _get_s3():
         # Sign the bucket's actual region with SigV4 (required by regions created
         # after 2014, e.g. us-east-2; also accepted everywhere else).
         _s3_region_resolved = _detect_bucket_region() or S3_REGION or "us-east-1"
+        # Pin the REGIONAL endpoint explicitly. Otherwise boto3 may presign
+        # against the global host (s3.amazonaws.com); S3 then 307-redirects to
+        # the regional host, and the redirect fails signature validation because
+        # the signed host no longer matches.
         _s3_client = boto3.client(
-            "s3", region_name=_s3_region_resolved,
-            config=Config(signature_version="s3v4"),
+            "s3",
+            region_name=_s3_region_resolved,
+            endpoint_url=f"https://s3.{_s3_region_resolved}.amazonaws.com",
+            config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
         )
     return _s3_client
 
