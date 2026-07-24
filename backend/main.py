@@ -361,7 +361,9 @@ def xai_generate_clip(image_url, prompt, duration, resolution, api_key):
     payload = {
         "model": "grok-imagine-video",
         "prompt": prompt,
-        "image": image_url,                    # image-to-video source (URL string)
+        # xAI expects an ImageUrl struct, not a bare string:
+        # {"url": "..."} — sending the string raises "expected struct ImageUrl".
+        "image": {"url": image_url},
         "duration": max(1, min(int(duration), 15)),
         "resolution": resolution,
     }

@@ -110,13 +110,26 @@ function App() {
     }
   };
 
-  // Reorder scenes (drag-and-drop handle, or the ▲/▼ buttons for mobile).
+  // Re-lay start/end sequentially from each scene's duration, in array order.
+  const recomputeTiming = (list) => {
+    let cursor = 0;
+    return list.map(s => {
+      const duration = s.duration || 8;
+      const start = cursor;
+      const end = start + duration;
+      cursor = end;
+      return { ...s, start, end, duration };
+    });
+  };
+
+  // Reorder scenes (drag-and-drop handle, or the ▲/▼ buttons for mobile),
+  // then renumber the timeline so start/end run in the new order.
   const moveScene = (from, to) => {
     if (to < 0 || to >= scenes.length || from === to) return;
     const ns = [...scenes];
     const [item] = ns.splice(from, 1);
     ns.splice(to, 0, item);
-    setScenes(ns);
+    setScenes(recomputeTiming(ns));
   };
 
   const handleSceneDrop = (target) => {
