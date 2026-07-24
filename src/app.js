@@ -138,6 +138,29 @@ function App() {
     setDragIndex(null);
   };
 
+  // Delete a scene and re-lay the timeline so it stays contiguous.
+  const deleteScene = (index) => {
+    setScenes(prev => recomputeTiming(prev.filter((_, idx) => idx !== index)));
+  };
+
+  // Append a new scene; recomputeTiming sets its start/end after the last one.
+  const addScene = () => {
+    setScenes(prev => recomputeTiming([
+      ...prev,
+      { id: Date.now(), description: "New scene", dialogue: '', isCharacterScene: false,
+        start: 0, duration: 8, end: 8, image: null, imagePreview: null, imageUrl: '' },
+    ]));
+  };
+
+  // Remove just the image from a scene (keeps dialogue/timing).
+  const clearSceneImage = (index) => {
+    setScenes(prev => prev.map((s, idx) =>
+      idx === index
+        ? { ...s, image: null, imagePreview: null, uploadError: '', uploading: false }
+        : s
+    ));
+  };
+
   const generateVideo = async () => {
     if (!apiKey) {
       setStatus("Please enter your xAI API Key");
@@ -314,7 +337,12 @@ function App() {
           {s.uploading && <span style={{ marginLeft: '10px' }}>⏳ Uploading…</span>}
           {!s.uploading && s.image && !s.uploadError && <span style={{ marginLeft: '10px' }}>✅ Uploaded</span>}
           {s.uploadError && <span style={{ marginLeft: '10px', color: '#ff6b6b' }}>⚠️ {s.uploadError}</span>}
-          {(s.imagePreview || s.image) && <img src={s.imagePreview || s.image} alt="still" style={{ maxWidth: '150px', margin: '5px 0', display: 'block' }} />}
+          {(s.imagePreview || s.image) && (
+            <div style={{ margin: '5px 0' }}>
+              <img src={s.imagePreview || s.image} alt="still" style={{ maxWidth: '150px', display: 'block' }} />
+              <button type="button" onClick={() => clearSceneImage(i)} style={{ marginTop: '5px' }}>🗑 Remove image</button>
+            </div>
+          )}
 
           Start <input type="number" value={s.start} onChange={e => {
             const ns = [...scenes];
@@ -337,13 +365,10 @@ function App() {
             setScenes(ns);
           }} style={{width:'60px'}} />s
 
-          <button onClick={() => setScenes(scenes.filter((_, idx) => idx !== i))} style={{marginTop: '8px'}}>Delete Scene</button>
+          <button onClick={() => deleteScene(i)} style={{marginTop: '8px'}}>Delete Scene</button>
         </div>
       ))}
-      <button onClick={() => {
-        const lastEnd = scenes.length > 0 ? scenes[scenes.length - 1].end || (scenes[scenes.length - 1].start + scenes[scenes.length - 1].duration) : 0;
-        setScenes([...scenes, { id: Date.now(), description: "New scene", dialogue: '', isCharacterScene: false, start: lastEnd, duration: 8, end: lastEnd + 8, image: null, imageUrl: '' }]);
-      }}>+ Add Scene</button>
+      <button onClick={addScene}>+ Add Scene</button>
 
       <br /><br />
       <button onClick={generateVideo} style={{ padding: '18px 50px', fontSize: '1.3em', background: '#00ff9f', border: 'none', borderRadius: '12px' }}>Generate Video</button>
