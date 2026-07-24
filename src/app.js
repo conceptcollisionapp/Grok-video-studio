@@ -162,6 +162,12 @@ function App() {
     ));
   };
 
+  const fmtElapsed = (sec) => {
+    if (sec == null) return '';
+    const s = Math.round(sec);
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+  };
+
   // Poll a job's status until it's done/error. Guarded by jobRef so a newer
   // job supersedes an older poll loop instead of both writing status.
   const pollStatus = async (jobId) => {
@@ -170,13 +176,14 @@ function App() {
       const res = await fetch(`${backendUrl}/status/${jobId}`);
       const s = await res.json();
       if (jobRef.current !== jobId) return;   // superseded while fetching
+      const t = fmtElapsed(s.elapsed_seconds);
       if (s.status === 'done') {
         setGeneratedVideoUrl(s.video_url);
-        setStatus('✅ Video ready!');
+        setStatus(`✅ Video ready! (${t})`);
       } else if (s.status === 'error') {
-        setStatus('⚠️ ' + (s.message || 'Generation failed'));
+        setStatus('⚠️ ' + (s.message || 'Generation failed') + (t ? ` (after ${t})` : ''));
       } else {
-        setStatus('⏳ ' + (s.stage || 'Processing…'));
+        setStatus(`⏳ ${s.stage || 'Processing…'}${t ? ` — ${t}` : ''}`);
         setTimeout(() => pollStatus(jobId), 4000);
       }
     } catch (e) {

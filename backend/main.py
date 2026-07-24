@@ -531,12 +531,35 @@ def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
     Runs in a background thread; progress + result are written to JOBS."""
     job_work = os.path.join(WORK_DIR, job_id)
     n = len(scene_list)
+
+    # Elapsed / per-stage timing. t0 anchors to started_at (set at submission)
+    # so total elapsed includes any queue wait; each `stage()` closes out the
+    # previous stage's duration into `timings`.
+    t0 = (_get_job(job_id) or {}).get("started_at") or time.time()
+    timings = []
+    _cur = {"name": None, "t": t0}
+
+    def stage(name):
+        now = time.time()
+        if _cur["name"]:
+            timings.append({"stage": _cur["name"], "seconds": round(now - _cur["t"], 1)})
+        _cur["name"] = name
+        _cur["t"] = now
+        _set_job(job_id, stage=name, elapsed_seconds=round(now - t0, 1),
+                 stage_timings=list(timings))
+
+    def close_last_stage():
+        now = time.time()
+        if _cur["name"]:
+            timings.append({"stage": _cur["name"], "seconds": round(now - _cur["t"], 1)})
+            _cur["name"] = None
+
     try:
         os.makedirs(job_work, exist_ok=True)
         width, height = RESOLUTION_DIMS.get(resolution, RESOLUTION_DIMS["720p"])
 
         # --- 1. one continuous narration track ----------------------------- #
-        _set_job(job_id, stage="Generating narration (TTS)")
+        stage("Generating narration (TTS)")
         narration = os.path.join(job_work, "narration.mp3")
         xai_tts(script, voice_id, api_key, narration)
         narration_len = probe_duration(narration)
@@ -546,7 +569,7 @@ def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
         cursor = 0.0                           # running offset into the narration
         for idx, scene in enumerate(scene_list):
             is_char = bool(scene.get("isCharacterScene"))
-            _set_job(job_id, stage=f"Scene {idx + 1}/{n}: generating video")
+            stage(f"Scene {idx + 1}/{n}: generating video")
             if is_char:
                 # Fixed character description for cross-scene consistency
                 # (reference images aren't allowed with image-to-video).
@@ -568,7 +591,7 @@ def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
 
             if is_char:
                 # Pair this clip with its slice of the narration and lip-sync it.
-                _set_job(job_id, stage=f"Scene {idx + 1}/{n}: lip-syncing")
+                stage(f"Scene {idx + 1}/{n}: lip-syncing")
                 seg = os.path.join(job_work, f"scene{idx}_audio.wav")
                 slice_audio(narration, cursor, clip_len, seg)
                 source_clip = replicate_lipsync(raw_clip, seg, replicate_api_key)
@@ -581,14 +604,14 @@ def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
             cursor += clip_len
 
         # --- 4. concat + overlay the FULL narration ------------------------ #
-        _set_job(job_id, stage="Combining clips + narration")
+        stage("Combining clips + narration")
         combined_silent = os.path.join(job_work, "combined_silent.mp4")
         concat_clips(final_clips, combined_silent)
 
         final_name = f"{job_id}.mp4"
         if s3_enabled():
             # Render into work dir, upload to S3 (durable), let finally clean up.
-            _set_job(job_id, stage="Uploading final video")
+            stage("Uploading final video")
             final_path = os.path.join(job_work, final_name)
             overlay_audio(combined_silent, narration, final_path)
             with open(final_path, "rb") as fh:
@@ -601,16 +624,20 @@ def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
             video_url = f"{base_url.rstrip('/')}/static/{final_name}"
             storage = "local"
 
+        close_last_stage()
         _set_job(
             job_id, status="done", stage="Done", video_url=video_url,
             storage=storage, narration_seconds=round(narration_len, 2),
-            scene_count=n,
+            scene_count=n, elapsed_seconds=round(time.time() - t0, 1),
+            stage_timings=list(timings),
             message="Video generated with continuous narration + lip-sync",
         )
     except PipelineError as e:
-        _set_job(job_id, status="error", stage="Error", message=e.message)
+        _set_job(job_id, status="error", stage="Error", message=e.message,
+                 elapsed_seconds=round(time.time() - t0, 1), stage_timings=list(timings))
     except Exception as e:  # noqa: BLE001 - surface anything unexpected clearly
-        _set_job(job_id, status="error", stage="Error", message=f"Unexpected error: {e}")
+        _set_job(job_id, status="error", stage="Error", message=f"Unexpected error: {e}",
+                 elapsed_seconds=round(time.time() - t0, 1), stage_timings=list(timings))
     finally:
         # Drop intermediate work; the final video is already in /static or S3.
         shutil.rmtree(job_work, ignore_errors=True)
@@ -666,7 +693,8 @@ def generate(
 
     # --- start the background pipeline, return the job handle -------------- #
     job_id = str(uuid.uuid4())
-    _set_job(job_id, job_id=job_id, status="processing", stage="Queued")
+    _set_job(job_id, job_id=job_id, status="processing", stage="Queued",
+             started_at=time.time(), elapsed_seconds=0.0)
     _executor.submit(
         _run_pipeline, job_id, str(request.base_url), script, api_key,
         replicate_api_key, scene_list, voice_id, resolution,
@@ -676,10 +704,17 @@ def generate(
 
 @app.get("/status/{job_id}")
 def job_status(job_id: str):
-    """Poll a generation job: processing / done (video_url) / error (message)."""
+    """Poll a generation job: processing / done (video_url) / error (message).
+
+    For a still-running job, elapsed_seconds is computed live so it keeps
+    ticking up even during a long stage; for done/error it's the frozen total.
+    """
     job = _get_job(job_id)
     if job is None:
         return JSONResponse(
             {"status": "error", "message": "Unknown job_id"}, status_code=404
         )
+    if job.get("status") == "processing" and job.get("started_at"):
+        job["elapsed_seconds"] = round(time.time() - job["started_at"], 1)
+    job.pop("started_at", None)   # internal timestamp; not useful to the client
     return job
