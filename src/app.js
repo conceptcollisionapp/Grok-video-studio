@@ -18,6 +18,8 @@ function App() {
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState('');
   const [status, setStatus] = useState('');
   const [dragIndex, setDragIndex] = useState(null);
+  const [stageTimings, setStageTimings] = useState([]);
+  const [totalSeconds, setTotalSeconds] = useState(null);
   const jobRef = useRef(null);
 
   // Real xAI TTS voice IDs (source: xAI TTS docs / GET /v1/tts/voices)
@@ -179,6 +181,8 @@ function App() {
       const t = fmtElapsed(s.elapsed_seconds);
       if (s.status === 'done') {
         setGeneratedVideoUrl(s.video_url);
+        setStageTimings(s.stage_timings || []);
+        setTotalSeconds(s.elapsed_seconds);
         setStatus(`✅ Video ready! (${t})`);
       } else if (s.status === 'error') {
         setStatus('⚠️ ' + (s.message || 'Generation failed') + (t ? ` (after ${t})` : ''));
@@ -223,6 +227,8 @@ function App() {
 
     setStatus('Starting…');
     setGeneratedVideoUrl('');
+    setStageTimings([]);
+    setTotalSeconds(null);
 
     // One continuous narration track = every scene's dialogue joined in order.
     const fullScript = scenes
@@ -413,6 +419,36 @@ function App() {
         <div style={{ marginTop: '30px' }}>
           <video controls src={generatedVideoUrl} style={{ width: '100%' }} />
           <button onClick={exportVideo} style={{ marginTop: '10px', padding: '12px 30px' }}>Export MP4</button>
+
+          {stageTimings.length > 0 && (
+            <details style={{ marginTop: '15px' }}>
+              <summary style={{ cursor: 'pointer' }}>
+                ⏱ Timing breakdown{totalSeconds != null ? ` — total ${fmtElapsed(totalSeconds)}` : ''}
+              </summary>
+              <table style={{ marginTop: '10px', borderCollapse: 'collapse', width: '100%', maxWidth: '480px' }}>
+                <tbody>
+                  {(() => {
+                    const slowest = Math.max(...stageTimings.map(x => x.seconds || 0));
+                    return stageTimings.map((x, idx) => {
+                      const isSlowest = (x.seconds || 0) === slowest;
+                      return (
+                        <tr key={idx} style={{ borderBottom: '1px solid #333' }}>
+                          <td style={{ padding: '6px 10px' }}>{x.stage}</td>
+                          <td style={{
+                            padding: '6px 10px', textAlign: 'right', whiteSpace: 'nowrap',
+                            fontWeight: isSlowest ? 'bold' : 'normal',
+                            color: isSlowest ? '#00ff9f' : 'inherit'
+                          }}>
+                            {fmtElapsed(x.seconds)}
+                          </td>
+                        </tr>
+                      );
+                    });
+                  })()}
+                </tbody>
+              </table>
+            </details>
+          )}
         </div>
       )}
 
