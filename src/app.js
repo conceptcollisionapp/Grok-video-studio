@@ -17,6 +17,7 @@ function App() {
   const [scenes, setScenes] = useState(() => JSON.parse(localStorage.getItem('scenes') || '[{"id":1,"description":"News Anchor","dialogue":"","isCharacterScene":true,"start":0,"duration":12,"end":12,"image":null,"imageUrl":""}]'));
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState('');
   const [status, setStatus] = useState('');
+  const [dragIndex, setDragIndex] = useState(null);
 
   // Real xAI TTS voice IDs (source: xAI TTS docs / GET /v1/tts/voices)
   const grokVoices = [
@@ -107,6 +108,21 @@ function App() {
       ));
       setStatus('Scene image upload failed: ' + e.message);
     }
+  };
+
+  // Reorder scenes (drag-and-drop handle, or the ▲/▼ buttons for mobile).
+  const moveScene = (from, to) => {
+    if (to < 0 || to >= scenes.length || from === to) return;
+    const ns = [...scenes];
+    const [item] = ns.splice(from, 1);
+    ns.splice(to, 0, item);
+    setScenes(ns);
+  };
+
+  const handleSceneDrop = (target) => {
+    if (dragIndex === null) return;
+    moveScene(dragIndex, target);
+    setDragIndex(null);
   };
 
   const generateVideo = async () => {
@@ -231,9 +247,31 @@ function App() {
       <h3>Full Script / Notes</h3>
       <textarea value={script} onChange={e => setScript(e.target.value)} rows="14" style={{width:'100%', padding:'12px', marginBottom:'15px', minHeight:'260px', boxSizing:'border-box', resize:'vertical', fontFamily:'inherit', lineHeight:'1.5'}} placeholder="Paste your full script here, then break it into each scene's dialogue below. (Narration is generated from the per-scene dialogue.)" />
 
-      <h3>Timeline — Scenes (dialogue, image & timing)</h3>
+      <h3>Timeline — Scenes (drag ⠿ to reorder)</h3>
       {scenes.map((s, i) => (
-        <div key={s.id} style={{ border: '1px solid #444', padding: '12px', margin: '10px 0', borderRadius: '8px' }}>
+        <div
+          key={s.id}
+          onDragOver={e => e.preventDefault()}
+          onDrop={() => handleSceneDrop(i)}
+          style={{
+            border: dragIndex === i ? '2px dashed #00ff9f' : '1px solid #444',
+            padding: '12px', margin: '10px 0', borderRadius: '8px',
+            opacity: dragIndex === i ? 0.6 : 1
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px' }}>
+            <span
+              draggable
+              onDragStart={() => setDragIndex(i)}
+              onDragEnd={() => setDragIndex(null)}
+              title="Drag to reorder scene"
+              style={{ cursor: 'grab', fontSize: '1.4em', userSelect: 'none' }}
+            >⠿</span>
+            <strong>Scene {i + 1}</strong>
+            <span style={{ flex: 1 }} />
+            <button type="button" onClick={() => moveScene(i, i - 1)} disabled={i === 0} title="Move up">▲</button>
+            <button type="button" onClick={() => moveScene(i, i + 1)} disabled={i === scenes.length - 1} title="Move down">▼</button>
+          </div>
           <input value={s.description} onChange={e => { const ns = [...scenes]; ns[i].description = e.target.value; setScenes(ns); }} placeholder="Description" style={{width:'70%'}} />
 
           <label style={{ display: 'block', margin: '8px 0' }}>
