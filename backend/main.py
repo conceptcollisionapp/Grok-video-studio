@@ -23,8 +23,10 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 import requests
@@ -501,56 +503,40 @@ def upload(request: Request, file: UploadFile = File(...)):
     return {"status": "success", "url": url, "filename": name, "storage": storage}
 
 
-@app.post("/generate")
-def generate(
-    request: Request,
-    script: str = Form(...),
-    api_key: str = Form(...),
-    replicate_api_key: str = Form(...),
-    scenes: str = Form(...),
-    voice_id: str = Form("eve"),
-    resolution: str = Form("720p"),
-    character_reference_urls: str = Form("[]"),
-):
-    job_id = str(uuid.uuid4())
+# --------------------------------------------------------------------------- #
+# Async job store — /generate starts a background worker and returns a job_id
+# immediately; the client polls /status/{job_id}. The full pipeline takes
+# minutes, well past Railway/Vercel proxy timeouts for a single request.
+# In-memory dict is fine for one instance (no DB yet); jobs reset on restart.
+# --------------------------------------------------------------------------- #
+JOBS = {}
+_jobs_lock = threading.Lock()
+_executor = ThreadPoolExecutor(max_workers=2)
+
+
+def _set_job(jid, **fields):
+    with _jobs_lock:
+        JOBS.setdefault(jid, {}).update(fields)
+
+
+def _get_job(job_id):
+    with _jobs_lock:
+        job = JOBS.get(job_id)
+        return dict(job) if job else None
+
+
+def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
+                  scene_list, voice_id, resolution):
+    """Full TTS -> per-scene video -> lip-sync -> concat -> upload pipeline.
+    Runs in a background thread; progress + result are written to JOBS."""
     job_work = os.path.join(WORK_DIR, job_id)
-
+    n = len(scene_list)
     try:
-        # --- preconditions ------------------------------------------------- #
-        if not FFMPEG or not FFPROBE:
-            raise PipelineError(
-                "ffmpeg/ffprobe not found on the server. Install ffmpeg and ensure "
-                "it is on PATH (restart the backend from a fresh shell after install).",
-                status_code=500,
-            )
-
-        try:
-            scene_list = json.loads(scenes)
-        except json.JSONDecodeError:
-            raise PipelineError("`scenes` was not valid JSON", status_code=400)
-        if not isinstance(scene_list, list) or not scene_list:
-            raise PipelineError("`scenes` must be a non-empty array", status_code=400)
-
-        has_character = any(s.get("isCharacterScene") for s in scene_list)
-        if has_character and not (replicate_api_key or "").strip():
-            raise PipelineError(
-                "Replicate API key is required for character lip-sync scenes.",
-                status_code=400,
-            )
-
-        missing_images = [i for i, s in enumerate(scene_list) if not s.get("image_url")]
-        if missing_images:
-            raise PipelineError(
-                f"Scenes {missing_images} have no image_url. The pipeline needs a "
-                "publicly reachable image URL per scene (blob: URLs from the browser "
-                "are not reachable by xAI's servers).",
-                status_code=400,
-            )
-
         os.makedirs(job_work, exist_ok=True)
         width, height = RESOLUTION_DIMS.get(resolution, RESOLUTION_DIMS["720p"])
 
         # --- 1. one continuous narration track ----------------------------- #
+        _set_job(job_id, stage="Generating narration (TTS)")
         narration = os.path.join(job_work, "narration.mp3")
         xai_tts(script, voice_id, api_key, narration)
         narration_len = probe_duration(narration)
@@ -560,8 +546,9 @@ def generate(
         cursor = 0.0                           # running offset into the narration
         for idx, scene in enumerate(scene_list):
             is_char = bool(scene.get("isCharacterScene"))
+            _set_job(job_id, stage=f"Scene {idx + 1}/{n}: generating video")
             if is_char:
-                # Prepend the fixed character description for cross-scene consistency
+                # Fixed character description for cross-scene consistency
                 # (reference images aren't allowed with image-to-video).
                 prompt = (
                     f"{CHARACTER_DESCRIPTION} A character speaking naturally to "
@@ -581,10 +568,10 @@ def generate(
 
             if is_char:
                 # Pair this clip with its slice of the narration and lip-sync it.
+                _set_job(job_id, stage=f"Scene {idx + 1}/{n}: lip-syncing")
                 seg = os.path.join(job_work, f"scene{idx}_audio.wav")
                 slice_audio(narration, cursor, clip_len, seg)
-                synced = replicate_lipsync(raw_clip, seg, replicate_api_key)
-                source_clip = synced
+                source_clip = replicate_lipsync(raw_clip, seg, replicate_api_key)
             else:
                 source_clip = raw_clip           # b-roll: motion only, no lip-sync
 
@@ -594,12 +581,14 @@ def generate(
             cursor += clip_len
 
         # --- 4. concat + overlay the FULL narration ------------------------ #
+        _set_job(job_id, stage="Combining clips + narration")
         combined_silent = os.path.join(job_work, "combined_silent.mp4")
         concat_clips(final_clips, combined_silent)
 
         final_name = f"{job_id}.mp4"
         if s3_enabled():
             # Render into work dir, upload to S3 (durable), let finally clean up.
+            _set_job(job_id, stage="Uploading final video")
             final_path = os.path.join(job_work, final_name)
             overlay_audio(combined_silent, narration, final_path)
             with open(final_path, "rb") as fh:
@@ -609,32 +598,88 @@ def generate(
             # Ephemeral: served from /static until the container restarts.
             final_path = os.path.join(STATIC_DIR, final_name)
             overlay_audio(combined_silent, narration, final_path)
-            video_url = f"{str(request.base_url).rstrip('/')}/static/{final_name}"
+            video_url = f"{base_url.rstrip('/')}/static/{final_name}"
             storage = "local"
 
-        # --- 5. respond ---------------------------------------------------- #
-        return JSONResponse({
-            "job_id": job_id,
-            "status": "success",
-            "video_url": video_url,
-            "storage": storage,
-            "narration_seconds": round(narration_len, 2),
-            "scene_count": len(scene_list),
-            "message": "Video generated with continuous narration + lip-sync",
-        })
-
-    except PipelineError as e:
-        return JSONResponse(
-            {"job_id": job_id, "status": "error", "message": e.message},
-            status_code=e.status_code,
+        _set_job(
+            job_id, status="done", stage="Done", video_url=video_url,
+            storage=storage, narration_seconds=round(narration_len, 2),
+            scene_count=n,
+            message="Video generated with continuous narration + lip-sync",
         )
+    except PipelineError as e:
+        _set_job(job_id, status="error", stage="Error", message=e.message)
     except Exception as e:  # noqa: BLE001 - surface anything unexpected clearly
+        _set_job(job_id, status="error", stage="Error", message=f"Unexpected error: {e}")
+    finally:
+        # Drop intermediate work; the final video is already in /static or S3.
+        shutil.rmtree(job_work, ignore_errors=True)
+
+
+@app.post("/generate")
+def generate(
+    request: Request,
+    script: str = Form(...),
+    api_key: str = Form(...),
+    replicate_api_key: str = Form(...),
+    scenes: str = Form(...),
+    voice_id: str = Form("eve"),
+    resolution: str = Form("720p"),
+    character_reference_urls: str = Form("[]"),
+):
+    """Validate input, start the pipeline in the background, return a job_id.
+    The heavy work runs for minutes (past proxy timeouts), so the client polls
+    /status/{job_id} rather than waiting on this request."""
+    # --- fast synchronous validation: immediate error on bad input --------- #
+    if not FFMPEG or not FFPROBE:
         return JSONResponse(
-            {"job_id": job_id, "status": "error", "message": f"Unexpected error: {e}"},
+            {"status": "error", "message": "ffmpeg/ffprobe not found on the server."},
             status_code=500,
         )
-    finally:
-        # Drop intermediate work. In local mode the final video lives in
-        # /static (outside job_work) and survives; in S3 mode it's already
-        # uploaded, so removing the work dir is safe.
-        shutil.rmtree(job_work, ignore_errors=True)
+    try:
+        scene_list = json.loads(scenes)
+    except json.JSONDecodeError:
+        return JSONResponse(
+            {"status": "error", "message": "`scenes` was not valid JSON"},
+            status_code=400,
+        )
+    if not isinstance(scene_list, list) or not scene_list:
+        return JSONResponse(
+            {"status": "error", "message": "`scenes` must be a non-empty array"},
+            status_code=400,
+        )
+    has_character = any(s.get("isCharacterScene") for s in scene_list)
+    if has_character and not (replicate_api_key or "").strip():
+        return JSONResponse(
+            {"status": "error",
+             "message": "Replicate API key is required for character lip-sync scenes."},
+            status_code=400,
+        )
+    missing_images = [i for i, s in enumerate(scene_list) if not s.get("image_url")]
+    if missing_images:
+        return JSONResponse(
+            {"status": "error",
+             "message": f"Scenes {missing_images} have no image_url. Each scene "
+                        "needs a publicly reachable image URL."},
+            status_code=400,
+        )
+
+    # --- start the background pipeline, return the job handle -------------- #
+    job_id = str(uuid.uuid4())
+    _set_job(job_id, job_id=job_id, status="processing", stage="Queued")
+    _executor.submit(
+        _run_pipeline, job_id, str(request.base_url), script, api_key,
+        replicate_api_key, scene_list, voice_id, resolution,
+    )
+    return JSONResponse({"job_id": job_id, "status": "processing"})
+
+
+@app.get("/status/{job_id}")
+def job_status(job_id: str):
+    """Poll a generation job: processing / done (video_url) / error (message)."""
+    job = _get_job(job_id)
+    if job is None:
+        return JSONResponse(
+            {"status": "error", "message": "Unknown job_id"}, status_code=404
+        )
+    return job

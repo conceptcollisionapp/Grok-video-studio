@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 function App() {
   const [darkMode, setDarkMode] = useState(() => {
@@ -18,6 +18,7 @@ function App() {
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState('');
   const [status, setStatus] = useState('');
   const [dragIndex, setDragIndex] = useState(null);
+  const jobRef = useRef(null);
 
   // Real xAI TTS voice IDs (source: xAI TTS docs / GET /v1/tts/voices)
   const grokVoices = [
@@ -161,6 +162,30 @@ function App() {
     ));
   };
 
+  // Poll a job's status until it's done/error. Guarded by jobRef so a newer
+  // job supersedes an older poll loop instead of both writing status.
+  const pollStatus = async (jobId) => {
+    if (jobRef.current !== jobId) return;
+    try {
+      const res = await fetch(`${backendUrl}/status/${jobId}`);
+      const s = await res.json();
+      if (jobRef.current !== jobId) return;   // superseded while fetching
+      if (s.status === 'done') {
+        setGeneratedVideoUrl(s.video_url);
+        setStatus('✅ Video ready!');
+      } else if (s.status === 'error') {
+        setStatus('⚠️ ' + (s.message || 'Generation failed'));
+      } else {
+        setStatus('⏳ ' + (s.stage || 'Processing…'));
+        setTimeout(() => pollStatus(jobId), 4000);
+      }
+    } catch (e) {
+      if (jobRef.current !== jobId) return;
+      setStatus('⏳ Checking status… (retrying)');
+      setTimeout(() => pollStatus(jobId), 5000);
+    }
+  };
+
   const generateVideo = async () => {
     if (!apiKey) {
       setStatus("Please enter your xAI API Key");
@@ -189,7 +214,8 @@ function App() {
       return;
     }
 
-    setStatus('Sending to backend...');
+    setStatus('Starting…');
+    setGeneratedVideoUrl('');
 
     // One continuous narration track = every scene's dialogue joined in order.
     const fullScript = scenes
@@ -215,19 +241,22 @@ function App() {
     formData.append('character_reference_urls', JSON.stringify(characterPreviews));
 
     try {
+      // Kicks off the pipeline and returns a job_id immediately (the work runs
+      // for minutes in the background — too long for one synchronous request).
       const res = await fetch(`${backendUrl}/generate`, {
         method: 'POST',
         body: formData
       });
       const data = await res.json();
-      console.log('Backend response:', data);
+      console.log('Generate response:', data);
 
-      if (data.video_url) {
-        setGeneratedVideoUrl(data.video_url);
-        setStatus('Video ready!');
-      } else {
-        setStatus('No video URL: ' + (data.message || 'Check xAI credits'));
+      if (!res.ok || !data.job_id) {
+        setStatus('⚠️ Could not start: ' + (data.message || `HTTP ${res.status}`));
+        return;
       }
+      jobRef.current = data.job_id;
+      setStatus('⏳ Queued…');
+      pollStatus(data.job_id);
     } catch (e) {
       setStatus('Connection error: ' + e.message);
       console.error(e);
