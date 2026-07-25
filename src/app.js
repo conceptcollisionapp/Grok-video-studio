@@ -2,15 +2,18 @@ import React, { useState, useEffect, useRef } from 'react';
 
 // Fixed character used by the "Pinky Newscaster" mode (voice + description
 // locked); "Open Studio" mode leaves both fully user-configurable.
-const PINKY_CHARACTER_DESCRIPTION = "Flat 2D cartoon anthropomorphic pink " +
-  "termination-slip character: torn ragged top edge, perforation holes, " +
-  "dog-eared corner, red 'TERMINATED' stamp across lower half. Simple " +
-  "black dot eyes, thick angled black eyebrows, small flat mouth, rosy " +
-  "cheeks. Navy suit jacket, white collared shirt, red necktie, small " +
-  "black cartoon hands. Seated at a glossy blue-and-glass news desk in a " +
-  "photorealistic modern TV newsroom with floor-to-ceiling city-view " +
-  "windows and studio lighting. Flat 2D character against a " +
-  "photorealistic backdrop.";
+// Broad identity only (colors, stamp, face, outfit, setting) — the uploaded
+// scene image carries the fine visual detail. Small texture details like the
+// dog-eared corner were rendered literally (a dog ear on the character), so
+// they're deliberately omitted.
+const PINKY_CHARACTER_DESCRIPTION = "Flat 2D cartoon anthropomorphic " +
+  "character made of salmon-pink termination-slip paper, with a red " +
+  "'TERMINATED' stamp across his lower half. Simple black dot eyes, thick " +
+  "angled black eyebrows, small flat mouth, rosy cheeks. Navy suit jacket, " +
+  "white collared shirt, red necktie, small black cartoon hands. Seated at " +
+  "a glossy blue-and-glass news desk in a photorealistic modern TV newsroom " +
+  "with floor-to-ceiling city-view windows and studio lighting. The flat 2D " +
+  "cartoon character contrasts with the photorealistic backdrop.";
 
 function App() {
   const [darkMode, setDarkMode] = useState(() => {
@@ -33,6 +36,12 @@ function App() {
   const [dragIndex, setDragIndex] = useState(null);
   const [stageTimings, setStageTimings] = useState([]);
   const [totalSeconds, setTotalSeconds] = useState(null);
+  const [videoHistory, setVideoHistory] = useState(() => JSON.parse(localStorage.getItem('videoHistory') || '[]'));
+  const [showHistory, setShowHistory] = useState(false);
+  const [playingUrl, setPlayingUrl] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [imageWarning, setImageWarning] = useState(false);
   const jobRef = useRef(null);
 
   // Real xAI TTS voice IDs (source: xAI TTS docs / GET /v1/tts/voices)
@@ -56,7 +65,8 @@ function App() {
     localStorage.setItem('voiceId', selectedVoice);
     localStorage.setItem('resolution', resolution);
     localStorage.setItem('scenes', JSON.stringify(scenes));
-  }, [mode, apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, resolution, scenes]);
+    localStorage.setItem('videoHistory', JSON.stringify(videoHistory));
+  }, [mode, apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, resolution, scenes, videoHistory]);
 
   // One-time cleanup of keys from removed features (they stored blob: URLs,
   // which are invalid after a reload anyway).
@@ -194,6 +204,14 @@ function App() {
         setGeneratedVideoUrl(s.video_url);
         setStageTimings(s.stage_timings || []);
         setTotalSeconds(s.elapsed_seconds);
+        // Record in local history (this browser only). Capped so localStorage
+        // can't grow unbounded.
+        setVideoHistory(prev => [{
+          id: `${Date.now()}-${jobId}`,
+          url: s.video_url,
+          date: Date.now(),
+          mode: mode === 'pinky' ? 'Pinky Newscaster' : 'Open Studio'
+        }, ...prev].slice(0, 50));
         setStatus(`✅ Video ready! (${t})`);
       } else if (s.status === 'error') {
         setStatus('⚠️ ' + (s.message || 'Generation failed') + (t ? ` (after ${t})` : ''));
@@ -208,7 +226,31 @@ function App() {
     }
   };
 
-  const generateVideo = async () => {
+  // Flag images that are low-resolution (short side < 512px) or an unusual
+  // aspect ratio, for the pre-generate warning. Reading dimensions via
+  // Image() works cross-origin (no canvas involved); unloadable images are
+  // skipped rather than false-flagged.
+  const anyRiskyImages = async (urls) => {
+    const flags = await Promise.all(urls.map(u => new Promise(resolve => {
+      const img = new Image();
+      let settled = false;
+      const done = (flag) => { if (!settled) { settled = true; resolve(flag); } };
+      img.onload = () => {
+        const w = img.naturalWidth, h = img.naturalHeight;
+        const ratio = w / h;
+        done(Math.min(w, h) < 512 || ratio > 2.4 || ratio < 1 / 2.4);
+      };
+      img.onerror = () => done(false);
+      setTimeout(() => done(false), 5000);
+      img.src = u;
+    })));
+    return flags.some(Boolean);
+  };
+
+  // Validate everything, then open the confirmation dialog. Shared by BOTH
+  // modes (Open Studio and Pinky Newscaster) — the actual request only fires
+  // from the dialog's "Yes, Generate".
+  const requestGenerate = async () => {
     if (!apiKey) {
       setStatus("Please enter your xAI API Key");
       return;
@@ -236,8 +278,7 @@ function App() {
       return;
     }
 
-    // One continuous narration track = every scene's dialogue joined in order.
-    // No fallback to Notes or a canned string — narration is scene dialogue only.
+    // Narration is scene dialogue only — no fallback to Notes or canned text.
     const fullScript = scenes
       .map(s => (s.dialogue || '').trim())
       .filter(Boolean)
@@ -253,6 +294,13 @@ function App() {
       return;
     }
 
+    setStatus('');
+    setImageWarning(await anyRiskyImages(scenes.map(s => s.imageUrl || s.image).filter(Boolean)));
+    setConfirmOpen(true);
+  };
+
+  // The confirmed submission — only ever called from the dialog.
+  const generateVideo = async () => {
     setStatus('Starting…');
     setGeneratedVideoUrl('');
     setStageTimings([]);
@@ -311,6 +359,37 @@ function App() {
     }
   };
 
+  // Download an S3 video. Cross-origin `download` attributes are ignored, so
+  // fetch to a blob first; if S3 CORS blocks the fetch, fall back to opening
+  // the video in a new tab (user can save from there).
+  const downloadVideo = async (url) => {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const obj = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = obj;
+      a.download = 'grok-video.mp4';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(obj), 10000);
+    } catch (e) {
+      window.open(url, '_blank', 'noopener');
+    }
+  };
+
+  const toggleSelected = (id) => {
+    setSelectedIds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    );
+  };
+
+  // Only ever removes what the user explicitly checked — no delete-all.
+  const deleteSelected = () => {
+    setVideoHistory(prev => prev.filter(h => !selectedIds.includes(h.id)));
+    setSelectedIds([]);
+  };
+
   return (
     <div style={{ padding: '15px', maxWidth: '100%', margin: 'auto', minHeight: '100vh' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
@@ -320,27 +399,87 @@ function App() {
         </button>
       </div>
 
-      <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
+      <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', flexWrap: 'wrap' }}>
         {[
           { id: 'open', label: '🎬 Open Studio' },
           { id: 'pinky', label: '📌 Pinky Newscaster' },
-        ].map(t => (
-          <button
-            key={t.id}
-            onClick={() => setMode(t.id)}
-            style={{
-              padding: '10px 24px', borderRadius: '8px', cursor: 'pointer',
-              border: mode === t.id ? '2px solid #00ff9f' : '1px solid #666',
-              background: mode === t.id ? '#00ff9f' : 'transparent',
-              color: mode === t.id ? '#000' : 'inherit',
-              fontWeight: mode === t.id ? 'bold' : 'normal',
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
+        ].map(t => {
+          const active = mode === t.id && !showHistory;
+          return (
+            <button
+              key={t.id}
+              onClick={() => { setMode(t.id); setShowHistory(false); }}
+              style={{
+                padding: '10px 24px', borderRadius: '8px', cursor: 'pointer',
+                border: active ? '2px solid #00ff9f' : '1px solid #666',
+                background: active ? '#00ff9f' : 'transparent',
+                color: active ? '#000' : 'inherit',
+                fontWeight: active ? 'bold' : 'normal',
+              }}
+            >
+              {t.label}
+            </button>
+          );
+        })}
+        <button
+          onClick={() => setShowHistory(v => !v)}
+          style={{
+            padding: '10px 24px', borderRadius: '8px', cursor: 'pointer',
+            border: showHistory ? '2px solid #00ff9f' : '1px solid #666',
+            background: showHistory ? '#00ff9f' : 'transparent',
+            color: showHistory ? '#000' : 'inherit',
+            fontWeight: showHistory ? 'bold' : 'normal',
+          }}
+        >
+          🕘 History{videoHistory.length ? ` (${videoHistory.length})` : ''}
+        </button>
       </div>
 
+      {showHistory ? (
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+            <h3 style={{ margin: 0 }}>Generated Videos</h3>
+            {selectedIds.length > 0 && (
+              <button onClick={deleteSelected} style={{ padding: '8px 16px', borderRadius: '8px', color: '#ff6b6b' }}>
+                🗑 Delete Selected ({selectedIds.length})
+              </button>
+            )}
+          </div>
+          <p style={{ fontSize: '0.8em', opacity: 0.7, margin: '6px 0 12px' }}>
+            This is a trial site. Not responsible for API credits used via your keys.
+          </p>
+          {videoHistory.length === 0 && (
+            <p style={{ opacity: 0.7 }}>No videos yet — completed generations will appear here. (History is saved in this browser only.)</p>
+          )}
+          {videoHistory.map(h => (
+            <div key={h.id} style={{ border: selectedIds.includes(h.id) ? '2px solid #00ff9f' : '1px solid #444', padding: '12px', margin: '10px 0', borderRadius: '8px' }}>
+              <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <input
+                  type="checkbox"
+                  checked={selectedIds.includes(h.id)}
+                  onChange={() => toggleSelected(h.id)}
+                  title="Select for deletion"
+                  style={{ width: '18px', height: '18px', cursor: 'pointer' }}
+                />
+                {/* preload="metadata" renders the first frame as a free thumbnail */}
+                <video src={h.url} preload="metadata" muted style={{ width: '120px', borderRadius: '6px', background: '#222' }} />
+                <div style={{ flex: 1, minWidth: '140px' }}>
+                  <div>{new Date(h.date).toLocaleString()}</div>
+                  <div style={{ opacity: 0.7, fontSize: '0.85em' }}>{h.mode}</div>
+                </div>
+                <button onClick={() => setPlayingUrl(playingUrl === h.id ? null : h.id)}>
+                  {playingUrl === h.id ? 'Hide' : '▶ Watch'}
+                </button>
+                <button onClick={() => downloadVideo(h.url)}>⬇ Download</button>
+              </div>
+              {playingUrl === h.id && (
+                <video controls autoPlay src={h.url} style={{ width: '100%', marginTop: '10px' }} />
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <>
       <input type="password" placeholder="xAI API Key (saved)" value={apiKey} onChange={e => setApiKey(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px', boxSizing:'border-box'}} />
       <input type="password" placeholder="Replicate API Key (saved)" value={replicateApiKey} onChange={e => setReplicateApiKey(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px', boxSizing:'border-box'}} />
 
@@ -407,7 +546,7 @@ function App() {
               checked={!!s.isCharacterScene}
               onChange={e => { const ns = [...scenes]; ns[i].isCharacterScene = e.target.checked; setScenes(ns); }}
             />{' '}
-            {s.isCharacterScene ? 'Character speaking (lip-sync)' : 'B-roll / graphic (pan & zoom only)'}
+            {s.isCharacterScene ? 'Animate image (character speaking)' : 'Still image'}
           </label>
 
           <textarea
@@ -464,12 +603,15 @@ function App() {
       <button onClick={addScene}>+ Add Scene</button>
 
       <br /><br />
-      <button onClick={generateVideo} style={{ padding: '18px 50px', fontSize: '1.3em', background: '#00ff9f', border: 'none', borderRadius: '12px' }}>Generate Video</button>
+      <button onClick={requestGenerate} style={{ padding: '18px 50px', fontSize: '1.3em', background: '#00ff9f', border: 'none', borderRadius: '12px' }}>Generate Video</button>
 
       {generatedVideoUrl && (
         <div style={{ marginTop: '30px' }}>
           <video controls src={generatedVideoUrl} style={{ width: '100%' }} />
           <button onClick={exportVideo} style={{ marginTop: '10px', padding: '12px 30px' }}>Export MP4</button>
+          <p style={{ fontSize: '0.8em', opacity: 0.7, margin: '6px 0 0' }}>
+            This is a trial site. Not responsible for API credits used via your keys.
+          </p>
 
           {stageTimings.length > 0 && (
             <details style={{ marginTop: '15px' }}>
@@ -500,6 +642,34 @@ function App() {
               </table>
             </details>
           )}
+        </div>
+      )}
+
+        </>
+      )}
+
+      {confirmOpen && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '20px' }}>
+          <div style={{ background: darkMode ? '#1c1c1c' : '#fff', border: '1px solid #555', borderRadius: '12px', padding: '24px', maxWidth: '480px', width: '100%' }}>
+            <h3 style={{ marginTop: 0 }}>Before you generate</h3>
+            <p>
+              ⚠️ This will use <strong>your own xAI and Replicate API credits</strong>.
+              There are <strong>no refunds</strong> for credits spent on a generation,
+              regardless of output quality.
+            </p>
+            <p style={{ opacity: 0.85 }}>
+              This is a trial/beta site and is not responsible for API credits used.
+            </p>
+            {imageWarning && (
+              <p style={{ color: '#ffb347' }}>
+                ⚠️ One or more images may be low resolution or an unusual format — results may not come out correctly.
+              </p>
+            )}
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '20px' }}>
+              <button onClick={() => setConfirmOpen(false)} style={{ padding: '10px 20px', borderRadius: '8px' }}>Cancel</button>
+              <button onClick={() => { setConfirmOpen(false); generateVideo(); }} style={{ padding: '10px 20px', borderRadius: '8px', background: '#00ff9f', border: 'none', fontWeight: 'bold' }}>Yes, Generate</button>
+            </div>
+          </div>
         </div>
       )}
 
