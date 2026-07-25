@@ -2,19 +2,15 @@ import React, { useState, useEffect, useRef } from 'react';
 
 // Fixed character used by the "Pinky Newscaster" mode (voice + description
 // locked); "Open Studio" mode leaves both fully user-configurable.
-const PINKY_CHARACTER_DESCRIPTION = "Flat 2D cartoon pink-slip character: a " +
-  "rectangular sheet of salmon-pink termination paper with a torn ragged " +
-  "top edge, perforation holes, and one dog-eared corner. Faint " +
-  "typewritten letter text on his body and a large distressed red " +
-  "'TERMINATED' rubber stamp angled across his lower half. Simple black " +
-  "dot eyes, thick angry-determined black eyebrows, small flat mouth, " +
-  "round rosy blush cheeks. Wears a dark navy suit jacket, white collared " +
-  "shirt, red necktie, small black cartoon hands. Seated behind a glossy " +
-  "blue-and-glass news desk holding a white 'NEWS COPY' sheet, in a " +
-  "photorealistic modern TV newsroom with floor-to-ceiling windows, " +
-  "daytime city skyline, studio lighting rigs, and a large wall monitor. " +
-  "His reflection shows in the polished desk. The 2D cartoon character " +
-  "contrasts with the photorealistic set.";
+const PINKY_CHARACTER_DESCRIPTION = "Flat 2D cartoon anthropomorphic pink " +
+  "termination-slip character: torn ragged top edge, perforation holes, " +
+  "dog-eared corner, red 'TERMINATED' stamp across lower half. Simple " +
+  "black dot eyes, thick angled black eyebrows, small flat mouth, rosy " +
+  "cheeks. Navy suit jacket, white collared shirt, red necktie, small " +
+  "black cartoon hands. Seated at a glossy blue-and-glass news desk in a " +
+  "photorealistic modern TV newsroom with floor-to-ceiling city-view " +
+  "windows and studio lighting. Flat 2D character against a " +
+  "photorealistic backdrop.";
 
 function App() {
   const [darkMode, setDarkMode] = useState(() => {
