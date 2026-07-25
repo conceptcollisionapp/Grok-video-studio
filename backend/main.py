@@ -35,7 +35,7 @@ import subprocess
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 
 import requests
@@ -251,6 +251,11 @@ class PipelineError(Exception):
         self.status_code = status_code
 
 
+class JobCancelled(Exception):
+    """Raised at cancellation checkpoints when the user has requested a stop.
+    Not an error — the pipeline converts it into a 'stopped' job status."""
+
+
 # --------------------------------------------------------------------------- #
 # ffmpeg helpers
 # --------------------------------------------------------------------------- #
@@ -428,8 +433,12 @@ def xai_tts(text, voice_id, api_key, dst):
     return dst
 
 
-def xai_generate_clip(image_url, prompt, duration, resolution, api_key):
-    """Kick off one image-to-video generation, poll to completion, return video URL."""
+def xai_generate_clip(image_url, prompt, duration, resolution, api_key,
+                      cancel_check=None):
+    """Kick off one image-to-video generation, poll to completion, return video URL.
+    `cancel_check` (optional callable) is invoked each poll tick and may raise
+    JobCancelled to abandon polling — the xAI generation itself continues
+    server-side (credits are committed once started)."""
     payload = {
         "model": "grok-imagine-video",
         "prompt": prompt,
@@ -456,6 +465,8 @@ def xai_generate_clip(image_url, prompt, duration, resolution, api_key):
 
     consecutive_failures = 0
     for _ in range(60):                        # up to ~5 min per clip
+        if cancel_check:
+            cancel_check()
         time.sleep(5)
         # Transient network blips / proxy errors / non-JSON bodies shouldn't
         # kill a multi-minute job — retry a few times before giving up.
@@ -640,7 +651,18 @@ def _get_job(job_id):
         return dict(job) if job else None
 
 
-def _process_scene(idx, scene, job_work, width, height, resolution,
+def _is_cancelled(jid):
+    return bool((_get_job(jid) or {}).get("cancel_requested"))
+
+
+def _check_cancel(jid):
+    """Cooperative cancellation checkpoint — threads can't be killed, so the
+    pipeline calls this between steps and lets in-flight API calls drain."""
+    if _is_cancelled(jid):
+        raise JobCancelled()
+
+
+def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
                    api_key, replicate_api_key, voice_id, character_description):
     """Produce a normalized clip + exactly-matching audio wav for one scene.
 
@@ -650,6 +672,7 @@ def _process_scene(idx, scene, job_work, width, height, resolution,
     ffmpeg — the generative model is never involved, so graphs/text stay
     pixel-perfect. Runs concurrently with other scenes (all independent).
     """
+    _check_cancel(job_id)   # don't start work for a stopped job
     dialogue = (scene.get("dialogue") or "").strip()
     is_char = bool(scene.get("isCharacterScene"))
 
@@ -677,15 +700,18 @@ def _process_scene(idx, scene, job_work, width, height, resolution,
             + "A character speaking naturally to camera, subtle head and "
             "body motion, professional demeanor."
         )
+        _check_cancel(job_id)   # about to spend an xAI video generation
         clip_url = xai_generate_clip(
-            scene["image_url"], prompt, clip_secs, resolution, api_key
+            scene["image_url"], prompt, clip_secs, resolution, api_key,
+            cancel_check=lambda: _check_cancel(job_id),
         )
         raw_clip = os.path.join(job_work, f"scene{idx}_raw.mp4")
         _download(clip_url, raw_clip)
-        source = (
-            replicate_lipsync(raw_clip, speech, replicate_api_key, job_work)
-            if dialogue else raw_clip
-        )
+        if dialogue:
+            _check_cancel(job_id)   # about to spend a Replicate lip-sync run
+            source = replicate_lipsync(raw_clip, speech, replicate_api_key, job_work)
+        else:
+            source = raw_clip
         normalize_clip(source, norm, width, height)
     else:
         # B-roll: hold the original image — zero motion, no regeneration.
@@ -743,19 +769,23 @@ def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
         # still (no generative model). Each returns a clip + matching audio.
         stage(f"Processing {n} scene{'s' if n != 1 else ''} (speech, clips, lip-sync)")
         results = [None] * n
+        done_count = 0
+        cancelled = False
         with ThreadPoolExecutor(max_workers=3) as scene_pool:
             futures = {
                 scene_pool.submit(
-                    _process_scene, idx, scene, job_work, width, height,
+                    _process_scene, job_id, idx, scene, job_work, width, height,
                     resolution, api_key, replicate_api_key, voice_id,
                     character_description,
                 ): idx
                 for idx, scene in enumerate(scene_list)
             }
-            done_count = 0
             for fut in as_completed(futures):
                 try:
                     res = fut.result()
+                except (JobCancelled, CancelledError):
+                    cancelled = True
+                    continue          # keep draining in-flight scenes
                 except Exception:
                     for f in futures:
                         f.cancel()   # skip scenes that haven't started yet
@@ -764,6 +794,21 @@ def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
                 done_count += 1
                 # Progress label only — not a new timing stage.
                 _set_job(job_id, stage=f"Processing scenes ({done_count}/{n} done)")
+                if _is_cancelled(job_id):
+                    cancelled = True
+                    for f in futures:
+                        f.cancel()   # unstarted scenes never run
+
+        if cancelled or _is_cancelled(job_id):
+            close_last_stage()
+            _set_job(
+                job_id, status="stopped", stage="Stopped",
+                scenes_completed=done_count, scene_count=n,
+                elapsed_seconds=round(time.time() - t0, 1),
+                stage_timings=list(timings),
+                message=f"Stopped — {done_count} of {n} scenes had completed.",
+            )
+            return
 
         # --- 2. assemble: video concat + narration concat ------------------- #
         # Each scene's audio was fitted to exactly its clip's length, so the
@@ -799,6 +844,10 @@ def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
             stage_timings=list(timings),
             message="Video generated with continuous narration + lip-sync",
         )
+    except JobCancelled:
+        close_last_stage()
+        _set_job(job_id, status="stopped", stage="Stopped", message="Stopped.",
+                 elapsed_seconds=round(time.time() - t0, 1), stage_timings=list(timings))
     except PipelineError as e:
         close_last_stage()   # record the failing stage's duration too
         _set_job(job_id, status="error", stage="Error", message=e.message,
@@ -887,6 +936,24 @@ def generate(
         replicate_api_key, scene_list, voice_id, resolution, character_description,
     )
     return JSONResponse({"job_id": job_id, "status": "processing"})
+
+
+@app.post("/cancel/{job_id}")
+def cancel_job(job_id: str):
+    """Request a cooperative stop. No new scene work starts after this;
+    in-flight API calls drain (threads can't be killed), then /status flips
+    to 'stopped' with a scenes-completed count."""
+    job = _get_job(job_id)
+    if job is None:
+        return JSONResponse(
+            {"status": "error", "message": "Unknown job_id"}, status_code=404
+        )
+    if job.get("status") != "processing":
+        return {"status": job.get("status"), "message": "Job is not running."}
+    _set_job(job_id, cancel_requested=True,
+             stage="Stopping — finishing in-flight work…")
+    return {"status": "cancelling",
+            "message": "Stop requested — finishing in-flight work."}
 
 
 @app.get("/status/{job_id}")

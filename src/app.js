@@ -42,6 +42,7 @@ function App() {
   const [selectedIds, setSelectedIds] = useState([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [imageWarning, setImageWarning] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const jobRef = useRef(null);
 
   // Real xAI TTS voice IDs (source: xAI TTS docs / GET /v1/tts/voices)
@@ -212,9 +213,14 @@ function App() {
           date: Date.now(),
           mode: mode === 'pinky' ? 'Pinky Newscaster' : 'Open Studio'
         }, ...prev].slice(0, 50));
+        setGenerating(false);
         setStatus(`✅ Video ready! (${t})`);
       } else if (s.status === 'error') {
+        setGenerating(false);
         setStatus('⚠️ ' + (s.message || 'Generation failed') + (t ? ` (after ${t})` : ''));
+      } else if (s.status === 'stopped') {
+        setGenerating(false);
+        setStatus('⏹ ' + (s.message || 'Stopped') + (t ? ` (${t})` : ''));
       } else {
         setStatus(`⏳ ${s.stage || 'Processing…'}${t ? ` — ${t}` : ''}`);
         setTimeout(() => pollStatus(jobId), 4000);
@@ -348,11 +354,26 @@ function App() {
         return;
       }
       jobRef.current = data.job_id;
+      setGenerating(true);
       setStatus('⏳ Queued…');
       pollStatus(data.job_id);
     } catch (e) {
+      setGenerating(false);
       setStatus('Connection error: ' + e.message);
       console.error(e);
+    }
+  };
+
+  // Ask the backend to stop the running job. Polling keeps going until the
+  // backend confirms 'stopped' (in-flight API calls have to drain first).
+  const stopGeneration = async () => {
+    const jid = jobRef.current;
+    if (!jid) return;
+    try {
+      await fetch(`${backendUrl}/cancel/${jid}`, { method: 'POST' });
+      setStatus('⏹ Stopping — finishing in-flight work…');
+    } catch (e) {
+      setStatus('Could not reach server to stop: ' + e.message);
     }
   };
 
@@ -609,7 +630,12 @@ function App() {
       <button onClick={addScene}>+ Add Scene</button>
 
       <br /><br />
-      <button onClick={requestGenerate} style={{ padding: '18px 50px', fontSize: '1.3em', background: '#00ff9f', border: 'none', borderRadius: '12px' }}>Generate Video</button>
+      <button onClick={requestGenerate} disabled={generating} style={{ padding: '18px 50px', fontSize: '1.3em', background: '#00ff9f', border: 'none', borderRadius: '12px', opacity: generating ? 0.5 : 1 }}>Generate Video</button>
+      {generating && (
+        <button onClick={stopGeneration} style={{ marginLeft: '15px', padding: '18px 30px', fontSize: '1.1em', borderRadius: '12px', border: '1px solid #ff6b6b', color: '#ff6b6b', background: 'transparent' }}>
+          ⏹ Stop
+        </button>
+      )}
 
       {generatedVideoUrl && (
         <div style={{ marginTop: '30px' }}>
