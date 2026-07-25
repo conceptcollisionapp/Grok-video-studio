@@ -67,6 +67,7 @@ async def lifespan(_app):
     else:
         logger.info("Storage: LOCAL /static (ephemeral — set S3_BUCKET to persist)")
     logger.info("Media tools: ffmpeg=%s ffprobe=%s", bool(FFMPEG), bool(FFPROBE))
+    logger.info("Lip-sync model: %s", LIPSYNC_MODEL)
     yield
 
 
@@ -100,7 +101,14 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 XAI_TTS_URL = "https://api.x.ai/v1/tts"
 XAI_VIDEO_URL = "https://api.x.ai/v1/videos/generations"
 XAI_VIDEO_STATUS_URL = "https://api.x.ai/v1/videos/{request_id}"
-REPLICATE_LIPSYNC_MODEL = "sync/lipsync-2"
+# Lip-sync model toggle for A/B testing (env-switchable, no code change):
+#   sync/lipsync-2       — current default
+#   bytedance/latentsync — alternative; explicitly supports animated characters
+#                          (relevant for cartoon anchors like Pinky)
+# Input schemas differ: both take {video, audio}, but sync_mode is
+# lipsync-2-only — LatentSync has no such parameter (confirmed via Replicate
+# schema mirrors; Replicate rejects unknown inputs).
+LIPSYNC_MODEL = os.environ.get("LIPSYNC_MODEL", "sync/lipsync-2").strip()
 
 # Resolve ffmpeg / ffprobe. In the Railway container the Dockerfile installs
 # them on PATH, so shutil.which is all that runs. The winget fallback below is
@@ -509,18 +517,23 @@ def xai_generate_clip(image_url, prompt, duration, resolution, api_key,
 
 
 def replicate_lipsync(video_path, audio_path, replicate_api_key, out_dir):
-    """Run sync/lipsync-2 on Replicate. The client uploads the local files for us.
+    """Run the configured lip-sync model on Replicate. The client uploads the
+    local files for us. The output lands in the job's out_dir so job cleanup
+    removes it.
 
-    sync_mode='silence' preserves the video length (pads the shorter track),
-    so a scene clip keeps its duration even if its audio slice is a bit short.
-    The output lands in the job's out_dir so job cleanup removes it.
+    Inputs are built per model — the two schemas are NOT identical:
+      sync/lipsync-2: {video, audio, sync_mode} (sync_mode='silence' preserves
+        the video length by padding the shorter track)
+      bytedance/latentsync: {video, audio} only (no sync_mode; passing unknown
+        inputs would be rejected)
     """
     client = replicate.Client(api_token=replicate_api_key)
     with open(video_path, "rb") as vf, open(audio_path, "rb") as af:
-        output = client.run(
-            REPLICATE_LIPSYNC_MODEL,
-            input={"video": vf, "audio": af, "sync_mode": "silence"},
-        )
+        if LIPSYNC_MODEL == "bytedance/latentsync":
+            model_input = {"video": vf, "audio": af}
+        else:  # sync/lipsync-2 (default) — existing path, unchanged
+            model_input = {"video": vf, "audio": af, "sync_mode": "silence"}
+        output = client.run(LIPSYNC_MODEL, input=model_input)
     if isinstance(output, list):
         output = output[0] if output else None
     if output is None:
@@ -566,6 +579,7 @@ async def root():
         "ffprobe": bool(FFPROBE),
         "s3": s3_enabled(),
         "storage": _storage_summary(),
+        "lipsync_model": LIPSYNC_MODEL,
     }
 
 
