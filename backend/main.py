@@ -516,6 +516,32 @@ def xai_generate_clip(image_url, prompt, duration, resolution, api_key,
     raise PipelineError("Timed out waiting for xAI video generation", status_code=504)
 
 
+def _resolve_lipsync_ref(client):
+    """Return the ref to hand client.run().
+
+    Official models (sync/lipsync-2) run by bare 'owner/name' via the
+    /v1/models/{owner}/{name}/predictions endpoint. Community models
+    (bytedance/latentsync) 404 on that endpoint and must be called with a
+    version hash via /v1/predictions — so resolve the latest version at
+    runtime for anything that isn't the official default. Set LIPSYNC_MODEL to
+    'owner/name:version' to pin a specific version instead.
+    """
+    if ":" in LIPSYNC_MODEL:
+        return LIPSYNC_MODEL                     # version explicitly pinned
+    if LIPSYNC_MODEL == "sync/lipsync-2":
+        return LIPSYNC_MODEL                     # official — bare name works
+    try:
+        model = client.models.get(LIPSYNC_MODEL)
+        version_id = getattr(getattr(model, "latest_version", None), "id", None)
+    except Exception as e:  # noqa: BLE001 - surface a clear lookup failure
+        raise PipelineError(f"Could not look up '{LIPSYNC_MODEL}' on Replicate: {e}")
+    if not version_id:
+        raise PipelineError(
+            f"Replicate model '{LIPSYNC_MODEL}' has no resolvable version."
+        )
+    return f"{LIPSYNC_MODEL}:{version_id}"
+
+
 def replicate_lipsync(video_path, audio_path, replicate_api_key, out_dir):
     """Run the configured lip-sync model on Replicate. The client uploads the
     local files for us. The output lands in the job's out_dir so job cleanup
@@ -528,12 +554,13 @@ def replicate_lipsync(video_path, audio_path, replicate_api_key, out_dir):
         inputs would be rejected)
     """
     client = replicate.Client(api_token=replicate_api_key)
+    ref = _resolve_lipsync_ref(client)   # bare name for official, +version for community
     with open(video_path, "rb") as vf, open(audio_path, "rb") as af:
         if LIPSYNC_MODEL == "bytedance/latentsync":
             model_input = {"video": vf, "audio": af}
         else:  # sync/lipsync-2 (default) — existing path, unchanged
             model_input = {"video": vf, "audio": af, "sync_mode": "silence"}
-        output = client.run(LIPSYNC_MODEL, input=model_input)
+        output = client.run(ref, input=model_input)
     if isinstance(output, list):
         output = output[0] if output else None
     if output is None:
