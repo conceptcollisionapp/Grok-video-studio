@@ -1,11 +1,29 @@
 import React, { useState, useEffect, useRef } from 'react';
 
+// Fixed character used by the "Pinky Newscaster" mode (voice + description
+// locked); "Open Studio" mode leaves both fully user-configurable.
+const PINKY_CHARACTER_DESCRIPTION = "Flat 2D cartoon pink-slip character: a " +
+  "rectangular sheet of salmon-pink termination paper with a torn ragged " +
+  "top edge, perforation holes, and one dog-eared corner. Faint " +
+  "typewritten letter text on his body and a large distressed red " +
+  "'TERMINATED' rubber stamp angled across his lower half. Simple black " +
+  "dot eyes, thick angry-determined black eyebrows, small flat mouth, " +
+  "round rosy blush cheeks. Wears a dark navy suit jacket, white collared " +
+  "shirt, red necktie, small black cartoon hands. Seated behind a glossy " +
+  "blue-and-glass news desk holding a white 'NEWS COPY' sheet, in a " +
+  "photorealistic modern TV newsroom with floor-to-ceiling windows, " +
+  "daytime city skyline, studio lighting rigs, and a large wall monitor. " +
+  "His reflection shows in the polished desk. The 2D cartoon character " +
+  "contrasts with the photorealistic set.";
+
 function App() {
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('darkMode');
     return saved === null ? true : saved === 'true';
   });
 
+  // 'pinky' = Pinky Newscaster (locked voice/character), 'open' = Open Studio.
+  const [mode, setMode] = useState(() => localStorage.getItem('studioMode') || 'pinky');
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('xaiKey') || '');
   const [replicateApiKey, setReplicateApiKey] = useState(() => localStorage.getItem('replicateKey') || '');
   const backendUrl = 'https://grok-video-studio-production.up.railway.app';
@@ -33,6 +51,7 @@ function App() {
   const resolutions = ['480p', '720p', '1080p'];
 
   useEffect(() => {
+    localStorage.setItem('studioMode', mode);
     localStorage.setItem('xaiKey', apiKey);
     localStorage.setItem('replicateKey', replicateApiKey);
     localStorage.setItem('darkMode', darkMode);
@@ -41,7 +60,7 @@ function App() {
     localStorage.setItem('voiceId', selectedVoice);
     localStorage.setItem('resolution', resolution);
     localStorage.setItem('scenes', JSON.stringify(scenes));
-  }, [apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, resolution, scenes]);
+  }, [mode, apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, resolution, scenes]);
 
   // One-time cleanup of keys from removed features (they stored blob: URLs,
   // which are invalid after a reload anyway).
@@ -152,6 +171,14 @@ function App() {
     ));
   };
 
+  // Rough spoken-duration estimate from dialogue text (~150 wpm average
+  // speech pace). Purely informational while writing — the real scene length
+  // comes from the measured TTS audio at generation time.
+  const estimateSpeechSeconds = (text) => {
+    const words = (text || '').trim().split(/\s+/).filter(Boolean).length;
+    return words === 0 ? 0 : Math.max(1, Math.round((words / 150) * 60));
+  };
+
   const fmtElapsed = (sec) => {
     if (sec == null) return '';
     const s = Math.round(sec);
@@ -223,8 +250,10 @@ function App() {
       setStatus('Add dialogue to at least one scene — narration is generated from scene dialogue.');
       return;
     }
-    if (fullScript.length > 15000) {
-      setStatus(`Script too long (${fullScript.length.toLocaleString()} chars; max 15,000). Shorten the scene dialogue.`);
+    // TTS runs per scene now, so the limit applies per scene's dialogue.
+    const longIdx = scenes.findIndex(s => (s.dialogue || '').length > 15000);
+    if (longIdx !== -1) {
+      setStatus(`Scene ${longIdx + 1} dialogue too long (max 15,000 chars per scene).`);
       return;
     }
 
@@ -247,9 +276,12 @@ function App() {
     formData.append('api_key', apiKey);
     formData.append('replicate_api_key', replicateApiKey);
     formData.append('scenes', JSON.stringify(scenePayload));
-    formData.append('voice_id', selectedVoice);
+    // Pinky Newscaster mode locks the voice + character; Open Studio uses
+    // whatever the user configured.
+    const isPinky = mode === 'pinky';
+    formData.append('voice_id', isPinky ? 'rex' : selectedVoice);
     formData.append('resolution', resolution);
-    formData.append('character_description', characterDescription.trim());
+    formData.append('character_description', isPinky ? PINKY_CHARACTER_DESCRIPTION : characterDescription.trim());
 
     try {
       // Kicks off the pipeline and returns a job_id immediately (the work runs
@@ -292,22 +324,51 @@ function App() {
         </button>
       </div>
 
+      <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
+        {[
+          { id: 'open', label: '🎬 Open Studio' },
+          { id: 'pinky', label: '📌 Pinky Newscaster' },
+        ].map(t => (
+          <button
+            key={t.id}
+            onClick={() => setMode(t.id)}
+            style={{
+              padding: '10px 24px', borderRadius: '8px', cursor: 'pointer',
+              border: mode === t.id ? '2px solid #00ff9f' : '1px solid #666',
+              background: mode === t.id ? '#00ff9f' : 'transparent',
+              color: mode === t.id ? '#000' : 'inherit',
+              fontWeight: mode === t.id ? 'bold' : 'normal',
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
       <input type="password" placeholder="xAI API Key (saved)" value={apiKey} onChange={e => setApiKey(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px', boxSizing:'border-box'}} />
       <input type="password" placeholder="Replicate API Key (saved)" value={replicateApiKey} onChange={e => setReplicateApiKey(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px', boxSizing:'border-box'}} />
 
-      <h3>Grok Voices (TTS narration)</h3>
-      <select value={selectedVoice} onChange={e => setSelectedVoice(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
-        {grokVoices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
-      </select>
+      {mode === 'open' ? (
+        <>
+          <h3>Grok Voices (TTS narration)</h3>
+          <select value={selectedVoice} onChange={e => setSelectedVoice(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
+            {grokVoices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+          </select>
 
-      <h3>Character Description</h3>
-      <textarea
-        value={characterDescription}
-        onChange={e => setCharacterDescription(e.target.value)}
-        rows="3"
-        style={{ width: '100%', padding: '12px', marginBottom: '15px', boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5' }}
-        placeholder="Describe your on-camera character's appearance & personality (used in every character scene to keep them consistent), e.g. 'Pinky, a cheerful pink puppet news anchor with big eyes, sitting at a news desk.'"
-      />
+          <h3>Character Description</h3>
+          <textarea
+            value={characterDescription}
+            onChange={e => setCharacterDescription(e.target.value)}
+            rows="3"
+            style={{ width: '100%', padding: '12px', marginBottom: '15px', boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5' }}
+            placeholder="Describe your on-camera character's appearance & personality (used in every character scene to keep them consistent), e.g. 'Pinky, a cheerful pink puppet news anchor with big eyes, sitting at a news desk.'"
+          />
+        </>
+      ) : (
+        <p style={{ opacity: 0.8, margin: '10px 0 15px' }}>
+          🔒 Voice: Rex (locked) · Character: Pinky (locked)
+        </p>
+      )}
 
       <h3>Resolution</h3>
       <select value={resolution} onChange={e => setResolution(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
@@ -360,6 +421,15 @@ function App() {
             style={{ width: '100%', padding: '10px', margin: '6px 0', minHeight: '110px', boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5' }}
             placeholder="Spoken line for this scene (part of the continuous narration)"
           />
+          {(s.dialogue || '').trim() && (() => {
+            const est = estimateSpeechSeconds(s.dialogue);
+            const over = s.isCharacterScene && est > 15;
+            return (
+              <div style={{ fontSize: '0.85em', opacity: over ? 1 : 0.7, color: over ? '#ff6b6b' : 'inherit', marginBottom: '4px' }}>
+                ≈ {est}s spoken{over ? ' — over the 15s character-scene limit, consider splitting' : ''}
+              </div>
+            );
+          })()}
 
           <input
             value={s.imageUrl || ''}
@@ -390,7 +460,7 @@ function App() {
           }} onBlur={() => {
             // Clamp + re-lay all starts/ends only once editing is finished.
             setScenes(prev => recomputeTiming(prev));
-          }} style={{width:'60px'}} />s <small>(1–15s, xAI limit)</small>
+          }} style={{width:'60px'}} />s <small>(used only when the scene has no dialogue — spoken scenes auto-size to their narration)</small>
 
           <button onClick={() => deleteScene(i)} style={{marginTop: '8px'}}>Delete Scene</button>
         </div>

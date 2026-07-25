@@ -5,17 +5,18 @@ POST /generate validates input, starts the pipeline in a background thread,
 and returns {job_id} immediately (the work takes minutes — past proxy
 timeouts). Clients poll GET /status/{job_id} for stage/elapsed/result.
 
-Pipeline (per job):
-  1. xAI TTS  -> one continuous narration audio file for the whole script
-     (the concatenated per-scene dialogue).
-  2. xAI Grok Imagine -> one image-to-video clip per scene.
-  3. Character scenes -> Replicate sync/lipsync-2, each paired with its slice of
-     the narration (offset by cumulative actual clip lengths via ffprobe).
-     B-roll scenes are left untouched (pan/zoom motion from the prompt only).
-  4. ffmpeg -> concatenate all clips in order, then overlay the FULL narration
-     audio over the whole thing so audio stays continuous even under b-roll.
-  5. Store the final video (S3 when configured, else local /static) and expose
-     its URL via /status. Scene images arrive via POST /upload (same storage).
+Pipeline (per job — scenes are processed concurrently, then assembled):
+  Character scenes: per-scene xAI TTS (duration measured) -> xAI Grok Imagine
+     image-to-video sized to the speech -> Replicate sync/lipsync-2 with that
+     scene's audio.
+  B-roll scenes: per-scene TTS (skipped when dialogue is empty), then ffmpeg
+     holds the still image for exactly the speech length. The generative video
+     model is never involved, so graphs/text stay pixel-perfect.
+  Assembly: each scene's audio is padded/trimmed to exactly its clip's length,
+     so concatenated video and concatenated narration line up 1:1; ffmpeg
+     concats both and muxes the narration over the whole video.
+  Output: stored to S3 when configured (else local /static), URL via /status.
+  Scene images arrive via POST /upload (same storage).
 
 Every external call below is based on real, current docs:
   - xAI TTS:   POST https://api.x.ai/v1/tts   (raw audio bytes unless with_timestamps)
@@ -27,13 +28,14 @@ Every external call below is based on real, current docs:
 import io
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 
 import requests
@@ -258,7 +260,10 @@ def _run(cmd, timeout=300):
     The timeout stops a hung ffmpeg from wedging a job as 'processing' forever
     (and permanently eating one of the few worker slots)."""
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        # stdin=DEVNULL: ffmpeg polls stdin for interactive commands and can
+        # wedge when inherited from a non-interactive parent.
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         raise PipelineError(
             f"{os.path.basename(cmd[0])} timed out after {timeout}s"
@@ -301,13 +306,43 @@ def normalize_clip(src, dst, width, height):
     ])
 
 
-def slice_audio(src, start, duration, dst):
-    """Cut [start, start+duration] from the narration into its own wav file."""
+def still_to_video(image_path, dst, duration, width, height):
+    """Hold a still image for `duration` seconds as a normalized video clip.
+    Zero motion, no generative model — the original pixels, held. Output is
+    already uniform (codec/size/fps) so it concats with normalized clips."""
+    vf = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+    )
     _run([
         FFMPEG, "-y",
-        "-i", src,
-        "-ss", f"{start:.3f}", "-t", f"{max(duration, 0.1):.3f}",
-        "-c:a", "pcm_s16le", "-ar", "24000",
+        "-loop", "1", "-i", image_path,
+        "-t", f"{max(duration, 0.5):.3f}",
+        "-vf", vf, "-r", "30",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
+        "-an", dst,
+    ])
+
+
+def fit_audio(src, dst, target_len):
+    """Pad with silence (or trim) so the audio is exactly target_len seconds,
+    normalized to pcm 24kHz mono so segments concat cleanly."""
+    _run([
+        FFMPEG, "-y", "-i", src,
+        "-af", "apad",
+        "-t", f"{max(target_len, 0.1):.3f}",
+        "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1",
+        dst,
+    ])
+
+
+def make_silence(dst, duration):
+    """A silent wav of `duration` seconds (same format as fit_audio output)."""
+    _run([
+        FFMPEG, "-y",
+        "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+        "-t", f"{max(duration, 0.1):.3f}",
+        "-c:a", "pcm_s16le",
         dst,
     ])
 
@@ -323,6 +358,20 @@ def concat_clips(clip_paths, dst, work_dir):
     _run([
         FFMPEG, "-y", "-f", "concat", "-safe", "0",
         "-i", list_file, "-c", "copy", dst,
+    ])
+
+
+def concat_audio(audio_paths, dst, work_dir):
+    """Concatenate uniform wav segments (pcm 24kHz mono) into one narration."""
+    list_file = os.path.join(work_dir, f"aconcat_{uuid.uuid4().hex}.txt")
+    with open(list_file, "w") as fh:
+        for p in audio_paths:
+            fh.write(f"file '{p.replace(os.sep, '/')}'\n")
+    _run([
+        FFMPEG, "-y", "-f", "concat", "-safe", "0",
+        "-i", list_file,
+        "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1",
+        dst,
     ])
 
 
@@ -346,7 +395,8 @@ def overlay_audio(video_src, audio_src, dst):
 # External API helpers
 # --------------------------------------------------------------------------- #
 def xai_tts(text, voice_id, api_key, dst):
-    """Generate one continuous narration mp3 via xAI TTS. Returns dst on success.
+    """Generate speech audio (mp3) via xAI TTS. Called once per scene with that
+    scene's dialogue; the same voice_id keeps the voice consistent across calls.
 
     Docs: POST /v1/tts returns RAW audio bytes when with_timestamps is not set.
     """
@@ -359,7 +409,7 @@ def xai_tts(text, voice_id, api_key, dst):
         json={
             "text": text,                  # length validated in /generate (max 15,000)
             "language": "en",
-            "voice_id": voice_id or "eve",
+            "voice_id": voice_id or "rex",
             "output_format": {"codec": "mp3", "sample_rate": 24000, "bit_rate": 128000},
         },
         timeout=120,
@@ -485,6 +535,14 @@ def _download(url, dst):
     return dst
 
 
+def _ext_from_url(url):
+    """Best-effort image extension from a URL path (ffmpeg probes content
+    anyway; this just keeps filenames sensible)."""
+    path = url.split("?", 1)[0]
+    ext = os.path.splitext(path)[1].lower()
+    return ext if ext in ALLOWED_IMAGE_EXTS else ".png"
+
+
 # --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
@@ -500,11 +558,10 @@ async def root():
     }
 
 
-ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".gif", ".bmp"}
+ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 MIME_BY_EXT = {
-    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".jfif": "image/jpeg",
-    ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
-    ".bmp": "image/bmp",
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp",
 }
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "10"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
@@ -583,9 +640,74 @@ def _get_job(job_id):
         return dict(job) if job else None
 
 
-def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
+def _process_scene(idx, scene, job_work, width, height, resolution,
+                   api_key, replicate_api_key, voice_id, character_description):
+    """Produce a normalized clip + exactly-matching audio wav for one scene.
+
+    Character scenes: per-scene TTS (measured) -> xAI image-to-video sized to
+    the speech -> Replicate lip-sync with that scene's audio.
+    B-roll scenes: the still image held for exactly the speech length via
+    ffmpeg — the generative model is never involved, so graphs/text stay
+    pixel-perfect. Runs concurrently with other scenes (all independent).
+    """
+    dialogue = (scene.get("dialogue") or "").strip()
+    is_char = bool(scene.get("isCharacterScene"))
+
+    # --- speech for this scene (skipped when there's no dialogue) ---------- #
+    speech = None
+    speech_len = 0.0
+    if dialogue:
+        speech = os.path.join(job_work, f"scene{idx}_speech.mp3")
+        xai_tts(dialogue, voice_id, api_key, speech)
+        speech_len = probe_duration(speech)
+
+    norm = os.path.join(job_work, f"scene{idx}_norm.mp4")
+    if is_char:
+        if dialogue and speech_len > 15.0:
+            raise PipelineError(
+                f"Scene {idx + 1}: dialogue runs {speech_len:.1f}s of speech, "
+                "but character clips are capped at 15s (xAI limit). Split the "
+                "dialogue across two scenes."
+            )
+        # Clip length driven by measured speech (fallback: user duration).
+        clip_secs = math.ceil(speech_len) if dialogue else scene.get("duration", 8)
+        desc = (character_description or "").strip()
+        prompt = (
+            (f"{desc} " if desc else "")
+            + "A character speaking naturally to camera, subtle head and "
+            "body motion, professional demeanor."
+        )
+        clip_url = xai_generate_clip(
+            scene["image_url"], prompt, clip_secs, resolution, api_key
+        )
+        raw_clip = os.path.join(job_work, f"scene{idx}_raw.mp4")
+        _download(clip_url, raw_clip)
+        source = (
+            replicate_lipsync(raw_clip, speech, replicate_api_key, job_work)
+            if dialogue else raw_clip
+        )
+        normalize_clip(source, norm, width, height)
+    else:
+        # B-roll: hold the original image — zero motion, no regeneration.
+        img = os.path.join(job_work, f"scene{idx}_img{_ext_from_url(scene['image_url'])}")
+        _download(scene["image_url"], img)
+        hold = speech_len if dialogue else max(1.0, min(60.0, float(scene.get("duration") or 8)))
+        still_to_video(img, norm, hold, width, height)
+
+    # --- audio segment fitted to EXACTLY the clip's length ----------------- #
+    # This is what keeps concatenated narration and video aligned 1:1.
+    clip_len = probe_duration(norm)
+    seg = os.path.join(job_work, f"scene{idx}_audio.wav")
+    if dialogue:
+        fit_audio(speech, seg, clip_len)
+    else:
+        make_silence(seg, clip_len)
+    return {"idx": idx, "clip": norm, "audio": seg}
+
+
+def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
                   scene_list, voice_id, resolution, character_description):
-    """Full TTS -> per-scene video -> lip-sync -> concat -> upload pipeline.
+    """Concurrent per-scene processing -> assembly -> upload.
     Runs in a background thread; progress + result are written to JOBS."""
     job_work = os.path.join(WORK_DIR, job_id)
     n = len(scene_list)
@@ -616,57 +738,42 @@ def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
         os.makedirs(job_work, exist_ok=True)
         width, height = RESOLUTION_DIMS.get(resolution, RESOLUTION_DIMS["720p"])
 
-        # --- 1. one continuous narration track ----------------------------- #
-        stage("Generating narration (TTS)")
-        narration = os.path.join(job_work, "narration.mp3")
-        xai_tts(script, voice_id, api_key, narration)
-        narration_len = probe_duration(narration)
+        # --- 1. process all scenes concurrently (they're independent) ------- #
+        # Character scenes: TTS -> xAI video -> lip-sync. B-roll: TTS + a held
+        # still (no generative model). Each returns a clip + matching audio.
+        stage(f"Processing {n} scene{'s' if n != 1 else ''} (speech, clips, lip-sync)")
+        results = [None] * n
+        with ThreadPoolExecutor(max_workers=3) as scene_pool:
+            futures = {
+                scene_pool.submit(
+                    _process_scene, idx, scene, job_work, width, height,
+                    resolution, api_key, replicate_api_key, voice_id,
+                    character_description,
+                ): idx
+                for idx, scene in enumerate(scene_list)
+            }
+            done_count = 0
+            for fut in as_completed(futures):
+                try:
+                    res = fut.result()
+                except Exception:
+                    for f in futures:
+                        f.cancel()   # skip scenes that haven't started yet
+                    raise
+                results[res["idx"]] = res
+                done_count += 1
+                # Progress label only — not a new timing stage.
+                _set_job(job_id, stage=f"Processing scenes ({done_count}/{n} done)")
 
-        # --- 2..3. per-scene clip generation + lip-sync -------------------- #
-        final_clips = []
-        cursor = 0.0                           # running offset into the narration
-        for idx, scene in enumerate(scene_list):
-            is_char = bool(scene.get("isCharacterScene"))
-            stage(f"Scene {idx + 1}/{n}: generating video")
-            if is_char:
-                # User-supplied character description, prepended for cross-scene
-                # consistency (reference images aren't allowed with image-to-video).
-                desc = (character_description or "").strip()
-                prompt = (
-                    (f"{desc} " if desc else "")
-                    + "A character speaking naturally to camera, subtle head and "
-                    "body motion, professional demeanor."
-                )
-            else:
-                prompt = (
-                    "Smooth subtle camera pan/zoom over this image, professional "
-                    "broadcast b-roll style."
-                )
-            clip_url = xai_generate_clip(
-                scene["image_url"], prompt, scene.get("duration", 8), resolution, api_key
-            )
-            raw_clip = os.path.join(job_work, f"scene{idx}_raw.mp4")
-            _download(clip_url, raw_clip)
-            clip_len = probe_duration(raw_clip)
-
-            if is_char:
-                # Pair this clip with its slice of the narration and lip-sync it.
-                stage(f"Scene {idx + 1}/{n}: lip-syncing")
-                seg = os.path.join(job_work, f"scene{idx}_audio.wav")
-                slice_audio(narration, cursor, clip_len, seg)
-                source_clip = replicate_lipsync(raw_clip, seg, replicate_api_key, job_work)
-            else:
-                source_clip = raw_clip           # b-roll: motion only, no lip-sync
-
-            norm = os.path.join(job_work, f"scene{idx}_norm.mp4")
-            normalize_clip(source_clip, norm, width, height)
-            final_clips.append(norm)
-            cursor += clip_len
-
-        # --- 4. concat + overlay the FULL narration ------------------------ #
+        # --- 2. assemble: video concat + narration concat ------------------- #
+        # Each scene's audio was fitted to exactly its clip's length, so the
+        # concatenated narration lines up with the concatenated video 1:1.
         stage("Combining clips + narration")
         combined_silent = os.path.join(job_work, "combined_silent.mp4")
-        concat_clips(final_clips, combined_silent, job_work)
+        concat_clips([r["clip"] for r in results], combined_silent, job_work)
+        narration = os.path.join(job_work, "narration.wav")
+        concat_audio([r["audio"] for r in results], narration, job_work)
+        narration_len = probe_duration(narration)
 
         final_name = f"{job_id}.mp4"
         if s3_enabled():
@@ -708,11 +815,11 @@ def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
 @app.post("/generate")
 def generate(
     request: Request,
-    script: str = Form(...),
+    script: str = Form(""),   # legacy — narration now comes from per-scene dialogue
     api_key: str = Form(...),
     replicate_api_key: str = Form(...),
     scenes: str = Form(...),
-    voice_id: str = Form("eve"),
+    voice_id: str = Form("rex"),
     resolution: str = Form("720p"),
     character_description: str = Form(""),
 ):
@@ -752,20 +859,22 @@ def generate(
                         "needs a publicly reachable image URL."},
             status_code=400,
         )
-    # Narration comes from scene dialogue — reject empty or over-limit scripts
-    # here instead of silently narrating fallbacks or truncating mid-sentence.
-    if not (script or "").strip():
+    # Narration is generated per scene from its dialogue — reject jobs with no
+    # spoken dialogue at all, and any single dialogue over the TTS call limit.
+    dialogues = [(s.get("dialogue") or "").strip() for s in scene_list]
+    if not any(dialogues):
         return JSONResponse(
             {"status": "error",
              "message": "No dialogue provided. Add dialogue to at least one "
                         "scene — narration is generated from scene dialogue."},
             status_code=400,
         )
-    if len(script) > 15000:
+    too_long = [i + 1 for i, d in enumerate(dialogues) if len(d) > 15000]
+    if too_long:
         return JSONResponse(
             {"status": "error",
-             "message": f"Script too long ({len(script):,} chars; xAI TTS max "
-                        "is 15,000). Shorten the scene dialogue."},
+             "message": f"Dialogue too long in scene(s) {too_long} — max "
+                        "15,000 chars per scene (xAI TTS limit)."},
             status_code=400,
         )
 
@@ -774,7 +883,7 @@ def generate(
     _set_job(job_id, job_id=job_id, status="processing", stage="Queued",
              started_at=time.time(), elapsed_seconds=0.0)
     _executor.submit(
-        _run_pipeline, job_id, str(request.base_url), script, api_key,
+        _run_pipeline, job_id, str(request.base_url), api_key,
         replicate_api_key, scene_list, voice_id, resolution, character_description,
     )
     return JSONResponse({"job_id": job_id, "status": "processing"})
