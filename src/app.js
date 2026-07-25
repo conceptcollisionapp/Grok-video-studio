@@ -8,11 +8,9 @@ function App() {
 
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('xaiKey') || '');
   const [replicateApiKey, setReplicateApiKey] = useState(() => localStorage.getItem('replicateKey') || '');
-  const [backendUrl] = useState('https://grok-video-studio-production.up.railway.app');
+  const backendUrl = 'https://grok-video-studio-production.up.railway.app';
   const [script, setScript] = useState(() => localStorage.getItem('script') || '');
   const [characterDescription, setCharacterDescription] = useState(() => localStorage.getItem('characterDescription') || '');
-  const [voicePreview, setVoicePreview] = useState(() => localStorage.getItem('voicePreview') || null);
-  const [characterPreviews, setCharacterPreviews] = useState(() => JSON.parse(localStorage.getItem('characterPreviews') || '[]'));
   const [selectedVoice, setSelectedVoice] = useState(() => localStorage.getItem('voiceId') || 'ara');
   const [resolution, setResolution] = useState(() => localStorage.getItem('resolution') || '720p');
   const [scenes, setScenes] = useState(() => JSON.parse(localStorage.getItem('scenes') || '[{"id":1,"description":"News Anchor","dialogue":"","isCharacterScene":true,"start":0,"duration":12,"end":12,"image":null,"imageUrl":""}]'));
@@ -38,13 +36,19 @@ function App() {
     localStorage.setItem('xaiKey', apiKey);
     localStorage.setItem('replicateKey', replicateApiKey);
     localStorage.setItem('darkMode', darkMode);
-    localStorage.setItem('characterPreviews', JSON.stringify(characterPreviews));
     localStorage.setItem('script', script);
     localStorage.setItem('characterDescription', characterDescription);
     localStorage.setItem('voiceId', selectedVoice);
     localStorage.setItem('resolution', resolution);
     localStorage.setItem('scenes', JSON.stringify(scenes));
-  }, [apiKey, replicateApiKey, darkMode, characterPreviews, script, characterDescription, selectedVoice, resolution, scenes]);
+  }, [apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, resolution, scenes]);
+
+  // One-time cleanup of keys from removed features (they stored blob: URLs,
+  // which are invalid after a reload anyway).
+  useEffect(() => {
+    localStorage.removeItem('voicePreview');
+    localStorage.removeItem('characterPreviews');
+  }, []);
 
   useEffect(() => {
     document.documentElement.style.backgroundColor = darkMode ? '#0f0f0f' : '#f8f9fa';
@@ -52,33 +56,6 @@ function App() {
   }, [darkMode]);
 
   const toggleMode = () => setDarkMode(!darkMode);
-
-  const handleVoice = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const url = URL.createObjectURL(file);
-      setVoicePreview(url);
-      localStorage.setItem('voicePreview', url);
-    }
-  };
-
-  const handleCharacter = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const url = URL.createObjectURL(file);
-      setCharacterPreviews([...characterPreviews, url]);
-    }
-  };
-
-  const clearVoice = () => {
-    setVoicePreview(null);
-    localStorage.removeItem('voicePreview');
-  };
-
-  const removeCharacter = (index) => {
-    const newPreviews = characterPreviews.filter((_, i) => i !== index);
-    setCharacterPreviews(newPreviews);
-  };
 
   const uploadFile = async (file) => {
     const fd = new FormData();
@@ -267,7 +244,6 @@ function App() {
     formData.append('voice_id', selectedVoice);
     formData.append('resolution', resolution);
     formData.append('character_description', characterDescription.trim());
-    formData.append('character_reference_urls', JSON.stringify(characterPreviews));
 
     try {
       // Kicks off the pipeline and returns a job_id immediately (the work runs
@@ -317,21 +293,6 @@ function App() {
       <select value={selectedVoice} onChange={e => setSelectedVoice(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
         {grokVoices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
       </select>
-
-      <h3>Custom Voice Sample</h3>
-      <input type="file" accept="audio/*" onChange={handleVoice} />
-      {voicePreview && <p>Voice saved <button onClick={clearVoice}>Clear</button></p>}
-
-      <h3>Character References (Multiple)</h3>
-      <input type="file" accept="image/*" onChange={handleCharacter} />
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', margin: '10px 0' }}>
-        {characterPreviews.map((p, i) => (
-          <div key={i}>
-            <img src={p} alt="char" style={{ maxWidth: '120px', borderRadius: '8px' }} />
-            <button onClick={() => removeCharacter(i)}>Remove</button>
-          </div>
-        ))}
-      </div>
 
       <h3>Character Description</h3>
       <textarea
@@ -411,25 +372,13 @@ function App() {
             </div>
           )}
 
-          Start <input type="number" value={s.start} onChange={e => {
-            const ns = [...scenes];
-            ns[i].start = +e.target.value;
-            ns[i].end = ns[i].start + (ns[i].duration || 8);
-            setScenes(ns);
-          }} style={{width:'60px'}} />s
-
-          End <input type="number" value={s.end || (s.start + s.duration)} onChange={e => {
-            const ns = [...scenes];
-            ns[i].duration = clampDuration(+e.target.value - ns[i].start);
-            ns[i].end = ns[i].start + ns[i].duration;
-            setScenes(ns);
-          }} style={{width:'60px'}} />s
-
-          Duration <input type="number" min="1" max="15" value={s.duration} onChange={e => {
+          {/* Start/End are derived from scene order + durations (recomputeTiming);
+              only Duration is a real input — it's all the backend uses. */}
+          <span style={{ opacity: 0.75 }}>Start {s.start}s → End {s.end || (s.start + s.duration)}s</span>
+          {'  '}Duration <input type="number" min="1" max="15" value={s.duration} onChange={e => {
             const ns = [...scenes];
             ns[i].duration = clampDuration(e.target.value);
-            ns[i].end = ns[i].start + ns[i].duration;
-            setScenes(ns);
+            setScenes(recomputeTiming(ns));   // re-lay all starts/ends downstream
           }} style={{width:'60px'}} />s <small>(1–15s, xAI limit)</small>
 
           <button onClick={() => deleteScene(i)} style={{marginTop: '8px'}}>Delete Scene</button>

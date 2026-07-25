@@ -1,15 +1,21 @@
 """
 Grok Video Studio backend.
 
-Pipeline (/generate):
-  1. xAI TTS  -> one continuous narration audio file for the whole script.
+POST /generate validates input, starts the pipeline in a background thread,
+and returns {job_id} immediately (the work takes minutes — past proxy
+timeouts). Clients poll GET /status/{job_id} for stage/elapsed/result.
+
+Pipeline (per job):
+  1. xAI TTS  -> one continuous narration audio file for the whole script
+     (the concatenated per-scene dialogue).
   2. xAI Grok Imagine -> one image-to-video clip per scene.
   3. Character scenes -> Replicate sync/lipsync-2, each paired with its slice of
-     the narration (trimmed by cumulative scene timestamps). B-roll scenes are
-     left untouched (they still get pan/zoom motion from the video prompt).
+     the narration (offset by cumulative actual clip lengths via ffprobe).
+     B-roll scenes are left untouched (pan/zoom motion from the prompt only).
   4. ffmpeg -> concatenate all clips in order, then overlay the FULL narration
      audio over the whole thing so audio stays continuous even under b-roll.
-  5. Save to /static and return its public URL.
+  5. Store the final video (S3 when configured, else local /static) and expose
+     its URL via /status. Scene images arrive via POST /upload (same storage).
 
 Every external call below is based on real, current docs:
   - xAI TTS:   POST https://api.x.ai/v1/tts   (raw audio bytes unless with_timestamps)
@@ -94,9 +100,10 @@ XAI_VIDEO_URL = "https://api.x.ai/v1/videos/generations"
 XAI_VIDEO_STATUS_URL = "https://api.x.ai/v1/videos/{request_id}"
 REPLICATE_LIPSYNC_MODEL = "sync/lipsync-2"
 
-# Resolve ffmpeg / ffprobe. winget installs them onto PATH after a shell restart;
-# if this backend was started from an older shell they may not be visible yet, so
-# we also probe the known winget install location before giving up.
+# Resolve ffmpeg / ffprobe. In the Railway container the Dockerfile installs
+# them on PATH, so shutil.which is all that runs. The winget fallback below is
+# Windows-dev-only (fresh installs aren't on PATH until a new shell) — it's a
+# no-op in the container because LOCALAPPDATA is unset.
 def _resolve_binary(name):
     found = shutil.which(name)
     if found:
@@ -708,7 +715,6 @@ def generate(
     voice_id: str = Form("eve"),
     resolution: str = Form("720p"),
     character_description: str = Form(""),
-    character_reference_urls: str = Form("[]"),
 ):
     """Validate input, start the pipeline in the background, return a job_id.
     The heavy work runs for minutes (past proxy timeouts), so the client polls
