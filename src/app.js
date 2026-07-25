@@ -306,6 +306,12 @@ function App() {
     setStageTimings([]);
     setTotalSeconds(null);
 
+    // Recomputed here (requestGenerate's copy is block-scoped to validation).
+    const fullScript = scenes
+      .map(s => (s.dialogue || '').trim())
+      .filter(Boolean)
+      .join(' ');
+
     // Per-scene payload the backend needs for the pipeline.
     const scenePayload = scenes.map(s => ({
       image_url: s.imageUrl || s.image || '',
