@@ -10,6 +10,7 @@ function App() {
   const [replicateApiKey, setReplicateApiKey] = useState(() => localStorage.getItem('replicateKey') || '');
   const [backendUrl] = useState('https://grok-video-studio-production.up.railway.app');
   const [script, setScript] = useState(() => localStorage.getItem('script') || '');
+  const [characterDescription, setCharacterDescription] = useState(() => localStorage.getItem('characterDescription') || '');
   const [voicePreview, setVoicePreview] = useState(() => localStorage.getItem('voicePreview') || null);
   const [characterPreviews, setCharacterPreviews] = useState(() => JSON.parse(localStorage.getItem('characterPreviews') || '[]'));
   const [selectedVoice, setSelectedVoice] = useState(() => localStorage.getItem('voiceId') || 'ara');
@@ -39,10 +40,11 @@ function App() {
     localStorage.setItem('darkMode', darkMode);
     localStorage.setItem('characterPreviews', JSON.stringify(characterPreviews));
     localStorage.setItem('script', script);
+    localStorage.setItem('characterDescription', characterDescription);
     localStorage.setItem('voiceId', selectedVoice);
     localStorage.setItem('resolution', resolution);
     localStorage.setItem('scenes', JSON.stringify(scenes));
-  }, [apiKey, replicateApiKey, darkMode, characterPreviews, script, selectedVoice, resolution, scenes]);
+  }, [apiKey, replicateApiKey, darkMode, characterPreviews, script, characterDescription, selectedVoice, resolution, scenes]);
 
   useEffect(() => {
     document.documentElement.style.backgroundColor = darkMode ? '#0f0f0f' : '#f8f9fa';
@@ -251,6 +253,7 @@ function App() {
     formData.append('scenes', JSON.stringify(scenePayload));
     formData.append('voice_id', selectedVoice);
     formData.append('resolution', resolution);
+    formData.append('character_description', characterDescription.trim());
     formData.append('character_reference_urls', JSON.stringify(characterPreviews));
 
     try {
@@ -316,6 +319,15 @@ function App() {
           </div>
         ))}
       </div>
+
+      <h3>Character Description</h3>
+      <textarea
+        value={characterDescription}
+        onChange={e => setCharacterDescription(e.target.value)}
+        rows="3"
+        style={{ width: '100%', padding: '12px', marginBottom: '15px', boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5' }}
+        placeholder="Describe your on-camera character's appearance & personality (used in every character scene to keep them consistent), e.g. 'Pinky, a cheerful pink puppet news anchor with big eyes, sitting at a news desk.'"
+      />
 
       <h3>Resolution</h3>
       <select value={resolution} onChange={e => setResolution(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>

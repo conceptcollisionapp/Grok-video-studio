@@ -83,17 +83,6 @@ XAI_VIDEO_URL = "https://api.x.ai/v1/videos/generations"
 XAI_VIDEO_STATUS_URL = "https://api.x.ai/v1/videos/{request_id}"
 REPLICATE_LIPSYNC_MODEL = "sync/lipsync-2"
 
-# xAI forbids combining reference images with image-to-video ("Only one mode can
-# be active per request"), so character_reference_urls is NOT sent to the video
-# endpoint. Instead, keep the character consistent across scenes by prepending
-# this fixed description to every character-scene prompt. EDIT THIS to match the
-# actual on-camera character you want.
-CHARACTER_DESCRIPTION = (
-    "The same on-camera news anchor in every shot: a professional adult presenter "
-    "with neat short dark hair, wearing a dark navy suit and tie, seated at a "
-    "modern broadcast news desk."
-)
-
 # Resolve ffmpeg / ffprobe. winget installs them onto PATH after a shell restart;
 # if this backend was started from an older shell they may not be visible yet, so
 # we also probe the known winget install location before giving up.
@@ -526,7 +515,7 @@ def _get_job(job_id):
 
 
 def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
-                  scene_list, voice_id, resolution):
+                  scene_list, voice_id, resolution, character_description):
     """Full TTS -> per-scene video -> lip-sync -> concat -> upload pipeline.
     Runs in a background thread; progress + result are written to JOBS."""
     job_work = os.path.join(WORK_DIR, job_id)
@@ -571,11 +560,13 @@ def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
             is_char = bool(scene.get("isCharacterScene"))
             stage(f"Scene {idx + 1}/{n}: generating video")
             if is_char:
-                # Fixed character description for cross-scene consistency
-                # (reference images aren't allowed with image-to-video).
+                # User-supplied character description, prepended for cross-scene
+                # consistency (reference images aren't allowed with image-to-video).
+                desc = (character_description or "").strip()
                 prompt = (
-                    f"{CHARACTER_DESCRIPTION} A character speaking naturally to "
-                    "camera, subtle head and body motion, professional demeanor."
+                    (f"{desc} " if desc else "")
+                    + "A character speaking naturally to camera, subtle head and "
+                    "body motion, professional demeanor."
                 )
             else:
                 prompt = (
@@ -652,6 +643,7 @@ def generate(
     scenes: str = Form(...),
     voice_id: str = Form("eve"),
     resolution: str = Form("720p"),
+    character_description: str = Form(""),
     character_reference_urls: str = Form("[]"),
 ):
     """Validate input, start the pipeline in the background, return a job_id.
@@ -697,7 +689,7 @@ def generate(
              started_at=time.time(), elapsed_seconds=0.0)
     _executor.submit(
         _run_pipeline, job_id, str(request.base_url), script, api_key,
-        replicate_api_key, scene_list, voice_id, resolution,
+        replicate_api_key, scene_list, voice_id, resolution, character_description,
     )
     return JSONResponse({"job_id": job_id, "status": "processing"})
 
