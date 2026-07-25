@@ -44,6 +44,7 @@ function App() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [imageWarning, setImageWarning] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [lipsyncModel, setLipsyncModel] = useState(null);
   const jobRef = useRef(null);
 
   // Real xAI TTS voice IDs (source: xAI TTS docs / GET /v1/tts/voices)
@@ -81,6 +82,19 @@ function App() {
     document.documentElement.style.backgroundColor = darkMode ? '#0f0f0f' : '#f8f9fa';
     document.documentElement.style.color = darkMode ? '#fff' : '#000';
   }, [darkMode]);
+
+  // Which lip-sync model the backend is actually running (set by a Railway env
+  // var). Surfaced in the UI so a test run can't silently hit the wrong model.
+  const refreshLipsyncModel = async () => {
+    try {
+      const res = await fetch(`${backendUrl}/health`);
+      const h = await res.json();
+      setLipsyncModel(h.lipsync_model || 'unknown');
+    } catch (e) {
+      setLipsyncModel(null);
+    }
+  };
+  useEffect(() => { refreshLipsyncModel(); }, []);
 
   const toggleMode = () => setDarkMode(!darkMode);
 
@@ -314,6 +328,7 @@ function App() {
     }
 
     setStatus('');
+    await refreshLipsyncModel();   // reflect the current Railway setting, not a stale mount value
     setImageWarning(await anyRiskyImages(scenes.map(s => s.imageUrl || s.image).filter(Boolean)));
     setConfirmOpen(true);
   };
@@ -530,6 +545,11 @@ function App() {
         >
           🕘 History{videoHistory.length ? ` (${videoHistory.length})` : ''}
         </button>
+      </div>
+
+      <div style={{ fontSize: '0.85em', opacity: 0.75, marginBottom: '15px' }}>
+        🎙 Lip-sync model: <strong>{lipsyncModel || '…'}</strong>
+        <button onClick={refreshLipsyncModel} title="Re-check the active model" style={{ marginLeft: '8px', padding: '1px 8px', borderRadius: '6px', cursor: 'pointer' }}>↻</button>
       </div>
 
       {showHistory ? (
@@ -785,6 +805,9 @@ function App() {
                 ⚠️ One or more images may be low resolution or an unusual format — results may not come out correctly.
               </p>
             )}
+            <p style={{ background: darkMode ? '#111' : '#eee', borderRadius: '8px', padding: '8px 12px' }}>
+              🎙 Active lip-sync model: <strong>{lipsyncModel || 'unavailable'}</strong>
+            </p>
             <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '20px' }}>
               <button onClick={() => setConfirmOpen(false)} style={{ padding: '10px 20px', borderRadius: '8px' }}>Cancel</button>
               <button onClick={() => { setConfirmOpen(false); generateVideo(); }} style={{ padding: '10px 20px', borderRadius: '8px', background: '#00ff9f', border: 'none', fontWeight: 'bold' }}>Yes, Generate</button>
