@@ -40,6 +40,7 @@ function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [playingUrl, setPlayingUrl] = useState(null);
   const [selectedIds, setSelectedIds] = useState([]);
+  const jobInputsRef = useRef(null);   // snapshot of the running job's inputs
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [imageWarning, setImageWarning] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -209,14 +210,26 @@ function App() {
         // can't grow unbounded.
         setVideoHistory(prev => [{
           id: `${Date.now()}-${jobId}`,
+          status: 'done',
           url: s.video_url,
           date: Date.now(),
-          mode: mode === 'pinky' ? 'Pinky Newscaster' : 'Open Studio'
+          mode: (jobInputsRef.current && jobInputsRef.current.modeLabel) || (mode === 'pinky' ? 'Pinky Newscaster' : 'Open Studio')
         }, ...prev].slice(0, 50));
         setGenerating(false);
         setStatus(`✅ Video ready! (${t})`);
       } else if (s.status === 'error') {
         setGenerating(false);
+        // Record the failure so the user can retry from the History tab.
+        setVideoHistory(prev => [{
+          id: `${Date.now()}-${jobId}`,
+          status: 'failed',
+          job_id: jobId,
+          date: Date.now(),
+          mode: (jobInputsRef.current && jobInputsRef.current.modeLabel) || (mode === 'pinky' ? 'Pinky Newscaster' : 'Open Studio'),
+          failedStage: s.failed_stage || s.stage || 'Unknown',
+          error: s.message || 'Generation failed',
+          config: jobInputsRef.current   // enables full-regen fallback
+        }, ...prev].slice(0, 50));
         setStatus('⚠️ ' + (s.message || 'Generation failed') + (t ? ` (after ${t})` : ''));
       } else if (s.status === 'stopped') {
         setGenerating(false);
@@ -327,6 +340,17 @@ function App() {
       isCharacterScene: !!s.isCharacterScene
     }));
 
+    // Snapshot inputs so a failed job's history entry can rebuild the studio
+    // for a from-scratch fallback (blob previews stripped — they don't survive).
+    jobInputsRef.current = {
+      scenes: scenes.map(({ imagePreview, ...s }) => s),
+      modeId: mode,
+      modeLabel: mode === 'pinky' ? 'Pinky Newscaster' : 'Open Studio',
+      characterDescription,
+      voiceId: selectedVoice,
+      resolution
+    };
+
     const formData = new FormData();
     formData.append('script', fullScript);
     formData.append('api_key', apiKey);
@@ -405,6 +429,52 @@ function App() {
     }
   };
 
+  // Restore a failed job's setup into the studio for a from-scratch regen
+  // (used when the backend can't resume). User then clicks Generate.
+  const restoreConfig = (cfg) => {
+    if (!cfg) return;
+    if (cfg.scenes) setScenes(cfg.scenes);
+    if (cfg.modeId) setMode(cfg.modeId);
+    if (cfg.characterDescription != null) setCharacterDescription(cfg.characterDescription);
+    if (cfg.voiceId) setSelectedVoice(cfg.voiceId);
+    if (cfg.resolution) setResolution(cfg.resolution);
+  };
+
+  // Retry a failed job: ask the backend to resume from where it died (reusing
+  // already-paid work). If it can't (24h window passed / server restarted),
+  // fall back to restoring the setup for a full from-scratch regeneration.
+  const retryJob = async (entry) => {
+    if (!apiKey) { setStatus('Enter your xAI API Key before retrying.'); return; }
+    setStatus('↻ Checking what can be resumed…');
+    try {
+      const fd = new FormData();
+      fd.append('api_key', apiKey);
+      fd.append('replicate_api_key', replicateApiKey);
+      const res = await fetch(`${backendUrl}/generate/${entry.job_id}/retry`, { method: 'POST', body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.job_id) {
+        // Resuming — remove the failed entry; a re-fail will record a fresh one.
+        setVideoHistory(prev => prev.filter(h => h.id !== entry.id));
+        jobInputsRef.current = entry.config || jobInputsRef.current;
+        jobRef.current = data.job_id;
+        setShowHistory(false);
+        setGenerating(true);
+        setStatus('↻ Retrying — reusing completed work…');
+        pollStatus(data.job_id);
+        return;
+      }
+      // 410 recoverable:false (or any non-resume response) → full regen path.
+      restoreConfig(entry.config);
+      setShowHistory(false);
+      setStatus((data && data.message) ||
+        "Previous work couldn't be recovered — this will regenerate everything from scratch and use new credits.");
+    } catch (e) {
+      restoreConfig(entry.config);
+      setShowHistory(false);
+      setStatus("Couldn't reach the server to resume — click Generate to regenerate from scratch (uses new credits).");
+    }
+  };
+
   const toggleSelected = (id) => {
     setSelectedIds(prev =>
       prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
@@ -476,10 +546,12 @@ function App() {
             This is a trial site. Not responsible for API credits used via your keys.
           </p>
           {videoHistory.length === 0 && (
-            <p style={{ opacity: 0.7 }}>No videos yet — completed generations will appear here. (History is saved in this browser only.)</p>
+            <p style={{ opacity: 0.7 }}>Nothing yet — completed and failed generations will appear here. (History is saved in this browser only.)</p>
           )}
-          {videoHistory.map(h => (
-            <div key={h.id} style={{ border: selectedIds.includes(h.id) ? '2px solid #00ff9f' : '1px solid #444', padding: '12px', margin: '10px 0', borderRadius: '8px' }}>
+          {videoHistory.map(h => {
+            const failed = h.status === 'failed';
+            return (
+            <div key={h.id} style={{ border: selectedIds.includes(h.id) ? '2px solid #00ff9f' : (failed ? '1px solid #7a3b3b' : '1px solid #444'), padding: '12px', margin: '10px 0', borderRadius: '8px' }}>
               <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
                 <input
                   type="checkbox"
@@ -488,22 +560,38 @@ function App() {
                   title="Select for deletion"
                   style={{ width: '18px', height: '18px', cursor: 'pointer' }}
                 />
-                {/* preload="metadata" renders the first frame as a free thumbnail */}
-                <video src={h.url} preload="metadata" muted style={{ width: '120px', borderRadius: '6px', background: '#222' }} />
-                <div style={{ flex: 1, minWidth: '140px' }}>
-                  <div>{new Date(h.date).toLocaleString()}</div>
-                  <div style={{ opacity: 0.7, fontSize: '0.85em' }}>{h.mode}</div>
-                </div>
-                <button onClick={() => setPlayingUrl(playingUrl === h.id ? null : h.id)}>
-                  {playingUrl === h.id ? 'Hide' : '▶ Watch'}
-                </button>
-                <button onClick={() => downloadVideo(h.url)}>⬇ Download</button>
+                {failed ? (
+                  <>
+                    <div style={{ flex: 1, minWidth: '180px' }}>
+                      <div>{new Date(h.date).toLocaleString()} · {h.mode}</div>
+                      <div style={{ color: '#ff6b6b', fontSize: '0.85em', marginTop: '2px' }}>
+                        ⚠️ Failed at: {h.failedStage}
+                      </div>
+                      <div style={{ opacity: 0.8, fontSize: '0.85em' }}>{h.error}</div>
+                    </div>
+                    <button onClick={() => retryJob(h)}>↻ Retry</button>
+                  </>
+                ) : (
+                  <>
+                    {/* preload="metadata" renders the first frame as a free thumbnail */}
+                    <video src={h.url} preload="metadata" muted style={{ width: '120px', borderRadius: '6px', background: '#222' }} />
+                    <div style={{ flex: 1, minWidth: '140px' }}>
+                      <div>{new Date(h.date).toLocaleString()}</div>
+                      <div style={{ opacity: 0.7, fontSize: '0.85em' }}>{h.mode}</div>
+                    </div>
+                    <button onClick={() => setPlayingUrl(playingUrl === h.id ? null : h.id)}>
+                      {playingUrl === h.id ? 'Hide' : '▶ Watch'}
+                    </button>
+                    <button onClick={() => downloadVideo(h.url)}>⬇ Download</button>
+                  </>
+                )}
               </div>
-              {playingUrl === h.id && (
+              {!failed && playingUrl === h.id && (
                 <video controls autoPlay src={h.url} style={{ width: '100%', marginTop: '10px' }} />
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         <>

@@ -68,6 +68,7 @@ async def lifespan(_app):
         logger.info("Storage: LOCAL /static (ephemeral — set S3_BUCKET to persist)")
     logger.info("Media tools: ffmpeg=%s ffprobe=%s", bool(FFMPEG), bool(FFPROBE))
     logger.info("Lip-sync model: %s", LIPSYNC_MODEL)
+    threading.Thread(target=_reap_retained, daemon=True).start()   # 24h cleanup
     yield
 
 
@@ -680,6 +681,14 @@ JOBS = {}
 _jobs_lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=2)
 
+# Failed jobs keep their work dir (completed scene clips + audio) so a retry can
+# resume from where it died instead of re-paying for succeeded xAI/Replicate
+# calls. Retained for RETENTION_SECONDS, then reaped. Note: this is local disk,
+# so a Railway redeploy/restart wipes it — retry then falls back to full regen.
+# Keys are NEVER retained (re-supplied on retry); only non-sensitive inputs are.
+RETENTION_SECONDS = 24 * 3600
+RETAINED = {}   # job_id -> {job_work, failed_at, scene_list, voice_id, resolution, character_description}
+
 
 def _set_job(jid, **fields):
     with _jobs_lock:
@@ -690,6 +699,30 @@ def _get_job(job_id):
     with _jobs_lock:
         job = JOBS.get(job_id)
         return dict(job) if job else None
+
+
+def _retain_failed(job_id, job_work, scene_list, voice_id, resolution,
+                   character_description):
+    with _jobs_lock:
+        RETAINED[job_id] = {
+            "job_work": job_work, "failed_at": time.time(),
+            "scene_list": scene_list, "voice_id": voice_id,
+            "resolution": resolution, "character_description": character_description,
+        }
+
+
+def _reap_retained():
+    """Background sweep: drop retained failed-job work dirs past the window."""
+    while True:
+        time.sleep(3600)
+        cutoff = time.time() - RETENTION_SECONDS
+        with _jobs_lock:
+            expired = [(jid, r["job_work"]) for jid, r in RETAINED.items()
+                       if r["failed_at"] < cutoff]
+            for jid, _ in expired:
+                RETAINED.pop(jid, None)
+        for _, work in expired:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def _is_cancelled(jid):
@@ -703,8 +736,18 @@ def _check_cancel(jid):
         raise JobCancelled()
 
 
+def _valid_media(path):
+    """True if a file exists and ffprobe reads a positive duration — guards
+    against partial/corrupt files left by a crashed run when reusing on retry."""
+    try:
+        return os.path.exists(path) and probe_duration(path) > 0
+    except PipelineError:
+        return False
+
+
 def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
-                   api_key, replicate_api_key, voice_id, character_description):
+                   api_key, replicate_api_key, voice_id, character_description,
+                   reuse=False):
     """Produce a normalized clip + exactly-matching audio wav for one scene.
 
     Character scenes: per-scene TTS (measured) -> xAI image-to-video sized to
@@ -712,20 +755,30 @@ def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
     B-roll scenes: the still image held for exactly the speech length via
     ffmpeg — the generative model is never involved, so graphs/text stay
     pixel-perfect. Runs concurrently with other scenes (all independent).
+
+    reuse=True (retry): skip any step whose output already exists and is valid,
+    so already-paid xAI TTS/video results are not regenerated.
     """
+    norm = os.path.join(job_work, f"scene{idx}_norm.mp4")
+    seg = os.path.join(job_work, f"scene{idx}_audio.wav")
+    speech = os.path.join(job_work, f"scene{idx}_speech.mp3")
+    raw_clip = os.path.join(job_work, f"scene{idx}_raw.mp4")
+
+    # Fully finished last time — nothing to redo, no credits spent.
+    if reuse and _valid_media(norm) and _valid_media(seg):
+        return {"idx": idx, "clip": norm, "audio": seg}
+
     _check_cancel(job_id)   # don't start work for a stopped job
     dialogue = (scene.get("dialogue") or "").strip()
     is_char = bool(scene.get("isCharacterScene"))
 
-    # --- speech for this scene (skipped when there's no dialogue) ---------- #
-    speech = None
+    # --- speech for this scene (reused if already generated) --------------- #
     speech_len = 0.0
     if dialogue:
-        speech = os.path.join(job_work, f"scene{idx}_speech.mp3")
-        xai_tts(dialogue, voice_id, api_key, speech)
+        if not (reuse and _valid_media(speech)):
+            xai_tts(dialogue, voice_id, api_key, speech)
         speech_len = probe_duration(speech)
 
-    norm = os.path.join(job_work, f"scene{idx}_norm.mp4")
     if is_char:
         if dialogue and speech_len > 15.0:
             raise PipelineError(
@@ -733,21 +786,22 @@ def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
                 "but character clips are capped at 15s (xAI limit). Split the "
                 "dialogue across two scenes."
             )
-        # Clip length driven by measured speech (fallback: user duration).
-        clip_secs = math.ceil(speech_len) if dialogue else scene.get("duration", 8)
-        desc = (character_description or "").strip()
-        prompt = (
-            (f"{desc} " if desc else "")
-            + "A character speaking naturally to camera, subtle head and "
-            "body motion, professional demeanor."
-        )
-        _check_cancel(job_id)   # about to spend an xAI video generation
-        clip_url = xai_generate_clip(
-            scene["image_url"], prompt, clip_secs, resolution, api_key,
-            cancel_check=lambda: _check_cancel(job_id),
-        )
-        raw_clip = os.path.join(job_work, f"scene{idx}_raw.mp4")
-        _download(clip_url, raw_clip)
+        # Reuse the already-generated xAI clip if present (skip straight to
+        # lip-sync); otherwise generate it.
+        if not (reuse and _valid_media(raw_clip)):
+            clip_secs = math.ceil(speech_len) if dialogue else scene.get("duration", 8)
+            desc = (character_description or "").strip()
+            prompt = (
+                (f"{desc} " if desc else "")
+                + "A character speaking naturally to camera, subtle head and "
+                "body motion, professional demeanor."
+            )
+            _check_cancel(job_id)   # about to spend an xAI video generation
+            clip_url = xai_generate_clip(
+                scene["image_url"], prompt, clip_secs, resolution, api_key,
+                cancel_check=lambda: _check_cancel(job_id),
+            )
+            _download(clip_url, raw_clip)
         if dialogue:
             _check_cancel(job_id)   # about to spend a Replicate lip-sync run
             source = replicate_lipsync(raw_clip, speech, replicate_api_key, job_work)
@@ -757,14 +811,14 @@ def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
     else:
         # B-roll: hold the original image — zero motion, no regeneration.
         img = os.path.join(job_work, f"scene{idx}_img{_ext_from_url(scene['image_url'])}")
-        _download(scene["image_url"], img)
+        if not (reuse and os.path.exists(img)):
+            _download(scene["image_url"], img)
         hold = speech_len if dialogue else max(1.0, min(60.0, float(scene.get("duration") or 8)))
         still_to_video(img, norm, hold, width, height)
 
     # --- audio segment fitted to EXACTLY the clip's length ----------------- #
     # This is what keeps concatenated narration and video aligned 1:1.
     clip_len = probe_duration(norm)
-    seg = os.path.join(job_work, f"scene{idx}_audio.wav")
     if dialogue:
         fit_audio(speech, seg, clip_len)
     else:
@@ -773,11 +827,14 @@ def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
 
 
 def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
-                  scene_list, voice_id, resolution, character_description):
+                  scene_list, voice_id, resolution, character_description,
+                  reuse=False):
     """Concurrent per-scene processing -> assembly -> upload.
-    Runs in a background thread; progress + result are written to JOBS."""
+    Runs in a background thread; progress + result are written to JOBS.
+    reuse=True resumes a retried job from its retained work dir."""
     job_work = os.path.join(WORK_DIR, job_id)
     n = len(scene_list)
+    retain = False   # keep work dir for retry when the job fails
 
     # Elapsed / per-stage timing. t0 anchors to started_at (set at submission)
     # so total elapsed includes any queue wait; each `stage()` closes out the
@@ -817,7 +874,7 @@ def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
                 scene_pool.submit(
                     _process_scene, job_id, idx, scene, job_work, width, height,
                     resolution, api_key, replicate_api_key, voice_id,
-                    character_description,
+                    character_description, reuse,
                 ): idx
                 for idx, scene in enumerate(scene_list)
             }
@@ -878,6 +935,8 @@ def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
             storage = "local"
 
         close_last_stage()
+        with _jobs_lock:
+            RETAINED.pop(job_id, None)   # a prior retained failure is now resolved
         _set_job(
             job_id, status="done", stage="Done", video_url=video_url,
             storage=storage, narration_seconds=round(narration_len, 2),
@@ -890,16 +949,29 @@ def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
         _set_job(job_id, status="stopped", stage="Stopped", message="Stopped.",
                  elapsed_seconds=round(time.time() - t0, 1), stage_timings=list(timings))
     except PipelineError as e:
+        failed_stage = _cur["name"] or (timings[-1]["stage"] if timings else "Unknown")
         close_last_stage()   # record the failing stage's duration too
         _set_job(job_id, status="error", stage="Error", message=e.message,
+                 failed_stage=failed_stage,
                  elapsed_seconds=round(time.time() - t0, 1), stage_timings=list(timings))
+        _retain_failed(job_id, job_work, scene_list, voice_id, resolution,
+                       character_description)
+        retain = True
     except Exception as e:  # noqa: BLE001 - surface anything unexpected clearly
+        failed_stage = _cur["name"] or (timings[-1]["stage"] if timings else "Unknown")
         close_last_stage()
         _set_job(job_id, status="error", stage="Error", message=f"Unexpected error: {e}",
+                 failed_stage=failed_stage,
                  elapsed_seconds=round(time.time() - t0, 1), stage_timings=list(timings))
+        _retain_failed(job_id, job_work, scene_list, voice_id, resolution,
+                       character_description)
+        retain = True
     finally:
-        # Drop intermediate work; the final video is already in /static or S3.
-        shutil.rmtree(job_work, ignore_errors=True)
+        # Keep the work dir only for a failed job (so retry can resume); the
+        # reaper drops it after RETENTION_SECONDS. Success/stop clean up now
+        # (the final video is already in /static or S3).
+        if not retain:
+            shutil.rmtree(job_work, ignore_errors=True)
 
 
 @app.post("/generate")
@@ -977,6 +1049,57 @@ def generate(
         replicate_api_key, scene_list, voice_id, resolution, character_description,
     )
     return JSONResponse({"job_id": job_id, "status": "processing"})
+
+
+@app.post("/generate/{job_id}/retry")
+def retry_job(
+    request: Request,
+    job_id: str,
+    api_key: str = Form(...),
+    replicate_api_key: str = Form(...),
+):
+    """Resume a failed job from where it died, reusing its already-completed
+    scene clips/audio so succeeded xAI/Replicate calls aren't re-paid.
+
+    Keys are re-supplied (never stored server-side). If the retained work is
+    gone (past the 24h window, or wiped by a restart), returns 410 with
+    recoverable=false so the client falls back to a full regeneration.
+    """
+    with _jobs_lock:
+        retained = dict(RETAINED.get(job_id) or {})
+
+    recoverable = bool(
+        retained
+        and os.path.isdir(retained.get("job_work", ""))
+        and (time.time() - retained.get("failed_at", 0)) <= RETENTION_SECONDS
+    )
+    if not recoverable:
+        return JSONResponse(
+            {"status": "error", "recoverable": False,
+             "message": "Previous work couldn't be recovered — this will "
+                        "regenerate everything from scratch and use new credits."},
+            status_code=410,
+        )
+
+    scene_list = retained["scene_list"]
+    if any(s.get("isCharacterScene") for s in scene_list) and not (replicate_api_key or "").strip():
+        return JSONResponse(
+            {"status": "error",
+             "message": "Replicate API key is required for character lip-sync scenes."},
+            status_code=400,
+        )
+
+    # Reuse the SAME job_id + work dir; reset run state and resume.
+    _set_job(job_id, status="processing", stage="Retrying — reusing completed work…",
+             started_at=time.time(), elapsed_seconds=0.0, cancel_requested=False)
+    with _jobs_lock:
+        RETAINED.pop(job_id, None)   # re-added by _run_pipeline if it fails again
+    _executor.submit(
+        _run_pipeline, job_id, str(request.base_url), api_key, replicate_api_key,
+        scene_list, retained["voice_id"], retained["resolution"],
+        retained["character_description"], True,   # reuse=True
+    )
+    return JSONResponse({"job_id": job_id, "status": "processing", "recoverable": True})
 
 
 @app.post("/cancel/{job_id}")
