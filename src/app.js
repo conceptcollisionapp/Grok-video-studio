@@ -93,8 +93,13 @@ function App() {
   };
 
   // xAI clips are 1-15s; clamp here so the UI never shows a length the
-  // backend would silently shorten.
-  const clampDuration = (d) => Math.max(1, Math.min(15, +d || 8));
+  // backend would silently shorten. Empty/non-numeric falls back to 8;
+  // real numbers clamp into range (so "0" becomes 1, not 8).
+  const clampDuration = (d) => {
+    const n = +d;
+    if (d === '' || d === null || d === undefined || !Number.isFinite(n)) return 8;
+    return Math.max(1, Math.min(15, n));
+  };
 
   // Re-lay start/end sequentially from each scene's duration, in array order.
   const recomputeTiming = (list) => {
@@ -232,7 +237,8 @@ function App() {
     const scenePayload = scenes.map(s => ({
       image_url: s.imageUrl || s.image || '',
       dialogue: s.dialogue || '',
-      duration: s.duration || 8,
+      // clamp here too — a mid-edit raw value may not have blurred yet
+      duration: clampDuration(s.duration),
       isCharacterScene: !!s.isCharacterScene
     }));
 
@@ -376,9 +382,14 @@ function App() {
               only Duration is a real input — it's all the backend uses. */}
           <span style={{ opacity: 0.75 }}>Start {s.start}s → End {s.end || (s.start + s.duration)}s</span>
           {'  '}Duration <input type="number" min="1" max="15" value={s.duration} onChange={e => {
+            // Store the raw value while typing — clearing or intermediate values
+            // like "2" (heading for "12") must not snap to 8/15 mid-edit.
             const ns = [...scenes];
-            ns[i].duration = clampDuration(e.target.value);
-            setScenes(recomputeTiming(ns));   // re-lay all starts/ends downstream
+            ns[i].duration = e.target.value;
+            setScenes(ns);
+          }} onBlur={() => {
+            // Clamp + re-lay all starts/ends only once editing is finished.
+            setScenes(prev => recomputeTiming(prev));
           }} style={{width:'60px'}} />s <small>(1–15s, xAI limit)</small>
 
           <button onClick={() => deleteScene(i)} style={{marginTop: '8px'}}>Delete Scene</button>
