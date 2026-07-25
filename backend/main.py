@@ -112,6 +112,11 @@ XAI_VIDEO_STATUS_URL = "https://api.x.ai/v1/videos/{request_id}"
 LIPSYNC_MODEL = os.environ.get("LIPSYNC_MODEL", "sync/lipsync-2").strip()
 KLING_MODEL = "kwaivgi/kling-lip-sync"
 
+# "Pinky Avatar" mode: character scenes go image + audio -> talking video in a
+# single Kling Avatar call (no xAI video, no separate lip-sync). Confirmed
+# schema: inputs image, audio, optional prompt (actions/emotions/camera).
+KLING_AVATAR_MODEL = "kwaivgi/kling-avatar-v2"
+
 
 def _lipsync_max_seconds():
     """Max clip length the active lip-sync model accepts (Kling caps at 10s;
@@ -556,28 +561,27 @@ def xai_generate_clip(image_url, prompt, duration, resolution, api_key,
     raise PipelineError("Timed out waiting for xAI video generation", status_code=504)
 
 
-def _resolve_lipsync_ref(client):
-    """Return the ref to hand client.run().
+def _resolve_replicate_ref(client, model_name):
+    """Return the ref to hand client.run() for a Replicate model.
 
-    Official models (sync/lipsync-2) run by bare 'owner/name' via the
+    Official models (e.g. sync/lipsync-2) run by bare 'owner/name' via the
     /v1/models/{owner}/{name}/predictions endpoint. Community models
-    (bytedance/latentsync) 404 on that endpoint and must be called with a
+    (e.g. bytedance/latentsync) 404 on that endpoint and must be called with a
     version hash via /v1/predictions — so resolve the latest version at
-    runtime for anything that isn't the official default. Set LIPSYNC_MODEL to
-    'owner/name:version' to pin a specific version instead.
+    runtime. A model string of 'owner/name:version' pins a specific version.
     """
-    if ":" in LIPSYNC_MODEL:
-        return LIPSYNC_MODEL                     # version explicitly pinned
-    if LIPSYNC_MODEL == "sync/lipsync-2":
-        return LIPSYNC_MODEL                     # official — bare name works
+    if ":" in model_name:
+        return model_name                        # version explicitly pinned
+    if model_name == "sync/lipsync-2":
+        return model_name                        # official — bare name works
     try:
-        model = client.models.get(LIPSYNC_MODEL)
+        model = client.models.get(model_name)
         version_id = getattr(getattr(model, "latest_version", None), "id", None)
     except Exception as e:  # noqa: BLE001 - surface a clear lookup failure
-        raise PipelineError(f"Could not look up '{LIPSYNC_MODEL}' on Replicate: {e}")
+        raise PipelineError(f"Could not look up '{model_name}' on Replicate: {e}")
     # Community models expose a version to pin; some official models expose none,
     # in which case the bare name works via the official predictions endpoint.
-    return f"{LIPSYNC_MODEL}:{version_id}" if version_id else LIPSYNC_MODEL
+    return f"{model_name}:{version_id}" if version_id else model_name
 
 
 def replicate_lipsync(video_path, audio_path, replicate_api_key, out_dir):
@@ -592,7 +596,7 @@ def replicate_lipsync(video_path, audio_path, replicate_api_key, out_dir):
         inputs would be rejected)
     """
     client = replicate.Client(api_token=replicate_api_key)
-    ref = _resolve_lipsync_ref(client)   # bare name for official, +version for community
+    ref = _resolve_replicate_ref(client, LIPSYNC_MODEL)   # bare for official, +version for community
     with open(video_path, "rb") as vf, open(audio_path, "rb") as af:
         if LIPSYNC_MODEL == KLING_MODEL:
             model_input = {"video_url": vf, "audio_file": af}
@@ -608,6 +612,32 @@ def replicate_lipsync(video_path, audio_path, replicate_api_key, out_dir):
 
     dst = os.path.join(out_dir, f"lipsync_{uuid.uuid4().hex}.mp4")
     # replicate>=1.0 returns a FileOutput (has .read()); older/raw may be a URL str.
+    if hasattr(output, "read"):
+        with open(dst, "wb") as fh:
+            fh.write(output.read())
+    else:
+        _download(str(output), dst)
+    return dst
+
+
+def kling_avatar(image_url, audio_path, replicate_api_key, dst, prompt=None):
+    """Kling Avatar v2: image + audio -> a finished talking video in one call
+    (no xAI video, no separate lip-sync). Confirmed schema: inputs `image`,
+    `audio`, optional `prompt` (actions/emotions/camera). The image is passed
+    as its public URL; the audio is uploaded by the client. Duration
+    auto-matches the audio. Output saved to dst."""
+    client = replicate.Client(api_token=replicate_api_key)
+    ref = _resolve_replicate_ref(client, KLING_AVATAR_MODEL)
+    with open(audio_path, "rb") as af:
+        model_input = {"image": image_url, "audio": af}
+        if prompt:
+            model_input["prompt"] = prompt
+        output = client.run(ref, input=model_input)
+    if isinstance(output, list):
+        output = output[0] if output else None
+    if output is None:
+        raise PipelineError("Kling Avatar returned no output")
+
     if hasattr(output, "read"):
         with open(dst, "wb") as fh:
             fh.write(output.read())
@@ -741,12 +771,13 @@ def _get_job(job_id):
 
 
 def _retain_failed(job_id, job_work, scene_list, voice_id, resolution,
-                   character_description):
+                   character_description, character_pipeline):
     with _jobs_lock:
         RETAINED[job_id] = {
             "job_work": job_work, "failed_at": time.time(),
             "scene_list": scene_list, "voice_id": voice_id,
             "resolution": resolution, "character_description": character_description,
+            "character_pipeline": character_pipeline,
         }
 
 
@@ -786,7 +817,7 @@ def _valid_media(path):
 
 def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
                    api_key, replicate_api_key, voice_id, character_description,
-                   reuse=False):
+                   reuse=False, character_pipeline="lipsync"):
     """Produce a normalized clip + exactly-matching audio wav for one scene.
 
     Character scenes: per-scene TTS (measured) -> xAI image-to-video sized to
@@ -818,7 +849,21 @@ def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
             xai_tts(dialogue, voice_id, api_key, speech)
         speech_len = probe_duration(speech)
 
-    if is_char:
+    if is_char and character_pipeline == "avatar":
+        # Pinky Avatar mode: image + this scene's speech -> talking video in a
+        # single Kling Avatar call. No xAI video, no separate lip-sync step.
+        if not dialogue:
+            raise PipelineError(
+                f"Scene {idx + 1}: Avatar mode needs dialogue — the audio drives "
+                "the talking avatar. Add a line or mark it a still image."
+            )
+        avatar_raw = os.path.join(job_work, f"scene{idx}_avatar.mp4")
+        if not (reuse and _valid_media(avatar_raw)):
+            _check_cancel(job_id)   # about to spend a Kling Avatar generation
+            prompt = (character_description or "").strip() or None
+            kling_avatar(scene["image_url"], speech, replicate_api_key, avatar_raw, prompt)
+        normalize_clip(avatar_raw, norm, width, height)
+    elif is_char:
         max_s = _lipsync_max_seconds()
         if dialogue and speech_len > max_s:
             raise PipelineError(
@@ -878,10 +923,11 @@ def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
 
 def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
                   scene_list, voice_id, resolution, character_description,
-                  reuse=False):
+                  reuse=False, character_pipeline="lipsync"):
     """Concurrent per-scene processing -> assembly -> upload.
     Runs in a background thread; progress + result are written to JOBS.
-    reuse=True resumes a retried job from its retained work dir."""
+    reuse=True resumes a retried job from its retained work dir.
+    character_pipeline: 'lipsync' (default) or 'avatar' (Pinky Avatar mode)."""
     job_work = os.path.join(WORK_DIR, job_id)
     n = len(scene_list)
     retain = False   # keep work dir for retry when the job fails
@@ -924,7 +970,7 @@ def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
                 scene_pool.submit(
                     _process_scene, job_id, idx, scene, job_work, width, height,
                     resolution, api_key, replicate_api_key, voice_id,
-                    character_description, reuse,
+                    character_description, reuse, character_pipeline,
                 ): idx
                 for idx, scene in enumerate(scene_list)
             }
@@ -1005,7 +1051,7 @@ def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
                  failed_stage=failed_stage,
                  elapsed_seconds=round(time.time() - t0, 1), stage_timings=list(timings))
         _retain_failed(job_id, job_work, scene_list, voice_id, resolution,
-                       character_description)
+                       character_description, character_pipeline)
         retain = True
     except Exception as e:  # noqa: BLE001 - surface anything unexpected clearly
         failed_stage = _cur["name"] or (timings[-1]["stage"] if timings else "Unknown")
@@ -1014,7 +1060,7 @@ def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
                  failed_stage=failed_stage,
                  elapsed_seconds=round(time.time() - t0, 1), stage_timings=list(timings))
         _retain_failed(job_id, job_work, scene_list, voice_id, resolution,
-                       character_description)
+                       character_description, character_pipeline)
         retain = True
     finally:
         # Keep the work dir only for a failed job (so retry can resume); the
@@ -1034,6 +1080,7 @@ def generate(
     voice_id: str = Form("rex"),
     resolution: str = Form("720p"),
     character_description: str = Form(""),
+    character_pipeline: str = Form("lipsync"),   # 'lipsync' (default) or 'avatar'
 ):
     """Validate input, start the pipeline in the background, return a job_id.
     The heavy work runs for minutes (past proxy timeouts), so the client polls
@@ -1091,12 +1138,14 @@ def generate(
         )
 
     # --- start the background pipeline, return the job handle -------------- #
+    pipeline = "avatar" if character_pipeline == "avatar" else "lipsync"
     job_id = str(uuid.uuid4())
     _set_job(job_id, job_id=job_id, status="processing", stage="Queued",
              started_at=time.time(), elapsed_seconds=0.0)
     _executor.submit(
         _run_pipeline, job_id, str(request.base_url), api_key,
         replicate_api_key, scene_list, voice_id, resolution, character_description,
+        False, pipeline,
     )
     return JSONResponse({"job_id": job_id, "status": "processing"})
 
@@ -1148,6 +1197,7 @@ def retry_job(
         _run_pipeline, job_id, str(request.base_url), api_key, replicate_api_key,
         scene_list, retained["voice_id"], retained["resolution"],
         retained["character_description"], True,   # reuse=True
+        retained.get("character_pipeline", "lipsync"),
     )
     return JSONResponse({"job_id": job_id, "status": "processing", "recoverable": True})
 

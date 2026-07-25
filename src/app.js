@@ -15,6 +15,13 @@ const PINKY_CHARACTER_DESCRIPTION = "Flat 2D cartoon anthropomorphic " +
   "with floor-to-ceiling city-view windows and studio lighting. The flat 2D " +
   "cartoon character contrasts with the photorealistic backdrop.";
 
+// Pinky Avatar mode's prompt for kwaivgi/kling-avatar-v2. That model's prompt
+// governs ACTION/emotion/camera (the uploaded image carries appearance), so
+// this is a simplified delivery-oriented description, not the full look.
+const PINKY_AVATAR_PROMPT = "A pink paper-slip cartoon news anchor delivering " +
+  "the news straight to camera with confident, professional energy and subtle, " +
+  "natural head movements.";
+
 function App() {
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('darkMode');
@@ -370,7 +377,7 @@ function App() {
     jobInputsRef.current = {
       scenes: scenes.map(({ imagePreview, ...s }) => s),
       modeId: mode,
-      modeLabel: mode === 'pinky' ? 'Pinky Newscaster' : 'Open Studio',
+      modeLabel: mode === 'pinky' ? 'Pinky Newscaster' : mode === 'avatar' ? 'Pinky Avatar' : 'Open Studio',
       characterDescription,
       voiceId: selectedVoice,
       resolution
@@ -381,12 +388,18 @@ function App() {
     formData.append('api_key', apiKey);
     formData.append('replicate_api_key', replicateApiKey);
     formData.append('scenes', JSON.stringify(scenePayload));
-    // Pinky Newscaster mode locks the voice + character; Open Studio uses
-    // whatever the user configured.
+    // Pinky Newscaster and Pinky Avatar both lock the voice + character; Open
+    // Studio uses whatever the user configured. Only Avatar changes how
+    // character scenes are processed (the character_pipeline flag).
     const isPinky = mode === 'pinky';
-    formData.append('voice_id', isPinky ? 'rex' : selectedVoice);
+    const isAvatar = mode === 'avatar';
+    formData.append('voice_id', (isPinky || isAvatar) ? 'rex' : selectedVoice);
     formData.append('resolution', resolution);
-    formData.append('character_description', isPinky ? PINKY_CHARACTER_DESCRIPTION : characterDescription.trim());
+    formData.append('character_description',
+      isAvatar ? PINKY_AVATAR_PROMPT
+      : isPinky ? PINKY_CHARACTER_DESCRIPTION
+      : characterDescription.trim());
+    formData.append('character_pipeline', isAvatar ? 'avatar' : 'lipsync');
 
     try {
       // Kicks off the pipeline and returns a job_id immediately (the work runs
@@ -525,6 +538,7 @@ function App() {
         {[
           { id: 'open', label: '🎬 Open Studio' },
           { id: 'pinky', label: '📌 Pinky Newscaster' },
+          { id: 'avatar', label: '🧪 Pinky Avatar (beta)', experimental: true },
         ].map(t => {
           const active = mode === t.id && !showHistory;
           return (
@@ -533,9 +547,9 @@ function App() {
               onClick={() => { setMode(t.id); setShowHistory(false); }}
               style={{
                 padding: '10px 24px', borderRadius: '8px', cursor: 'pointer',
-                border: active ? '2px solid #00ff9f' : '1px solid #666',
+                border: active ? '2px solid #00ff9f' : (t.experimental ? '1px dashed #c77dff' : '1px solid #666'),
                 background: active ? '#00ff9f' : 'transparent',
-                color: active ? '#000' : 'inherit',
+                color: active ? '#000' : (t.experimental ? '#c77dff' : 'inherit'),
                 fontWeight: active ? 'bold' : 'normal',
               }}
             >
@@ -645,9 +659,18 @@ function App() {
           />
         </>
       ) : (
-        <p style={{ opacity: 0.8, margin: '10px 0 15px' }}>
-          🔒 Voice: Rex (locked) · Character: Pinky (locked)
-        </p>
+        <div style={{ margin: '10px 0 15px' }}>
+          <p style={{ opacity: 0.8, margin: 0 }}>
+            🔒 Voice: Rex (locked) · Character: Pinky (locked)
+          </p>
+          {mode === 'avatar' && (
+            <p style={{ color: '#c77dff', fontSize: '0.9em', margin: '6px 0 0' }}>
+              🧪 Experimental pipeline: character scenes are generated in one step
+              by Kling Avatar (image + audio → talking video), skipping xAI motion
+              and the separate lip-sync. Still-image scenes are unchanged.
+            </p>
+          )}
+        </div>
       )}
 
       <h3>Resolution</h3>
