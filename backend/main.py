@@ -7,8 +7,9 @@ timeouts). Clients poll GET /status/{job_id} for stage/elapsed/result.
 
 Pipeline (per job — scenes are processed concurrently, then assembled):
   Character scenes: per-scene xAI TTS (duration measured) -> xAI Grok Imagine
-     image-to-video sized to the speech -> Replicate sync/lipsync-2 with that
-     scene's audio.
+     image-to-video sized to the speech -> Replicate lip-sync with that scene's
+     audio, model auto-picked by clip length (<=10s Kling, >10s sync/lipsync-2).
+     (Pinky Avatar mode instead uses a single Kling Avatar call — see below.)
   B-roll scenes: per-scene TTS (skipped when dialogue is empty), then ffmpeg
      holds the still image for exactly the speech length. The generative video
      model is never involved, so graphs/text stay pixel-perfect.
@@ -67,7 +68,7 @@ async def lifespan(_app):
     else:
         logger.info("Storage: LOCAL /static (ephemeral — set S3_BUCKET to persist)")
     logger.info("Media tools: ffmpeg=%s ffprobe=%s", bool(FFMPEG), bool(FFPROBE))
-    logger.info("Lip-sync model: %s", LIPSYNC_MODEL)
+    logger.info("Lip-sync model: %s", _lipsync_model_display())
     threading.Thread(target=_reap_retained, daemon=True).start()   # 24h cleanup
     yield
 
@@ -102,15 +103,19 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 XAI_TTS_URL = "https://api.x.ai/v1/tts"
 XAI_VIDEO_URL = "https://api.x.ai/v1/videos/generations"
 XAI_VIDEO_STATUS_URL = "https://api.x.ai/v1/videos/{request_id}"
-# Lip-sync model toggle for A/B testing (env-switchable, no code change):
-#   sync/lipsync-2        — current default; input {video, audio, sync_mode}
-#   bytedance/latentsync  — animated-character support; input {video, audio}
-#   kwaivgi/kling-lip-sync — best for cartoon/stylized characters; input
-#       {video_url, audio_file}; HARD constraints: clip 2-10s and 720p-1080p.
-# Input schemas differ per model (confirmed via Replicate schema/llms.txt);
-# Replicate rejects unknown inputs, so each is built explicitly below.
-LIPSYNC_MODEL = os.environ.get("LIPSYNC_MODEL", "sync/lipsync-2").strip()
 KLING_MODEL = "kwaivgi/kling-lip-sync"
+
+# Lip-sync model policy (LIPSYNC_MODEL env var):
+#   "auto" (default) — pick PER SCENE by the clip's measured duration:
+#       clip <= 10s -> kwaivgi/kling-lip-sync (best for cartoon/stylized faces,
+#                      but has a hard 2-10s + 720p-1080p input constraint)
+#       clip  > 10s -> sync/lipsync-2 (no length constraint; correct fallback)
+#   any specific model string (sync/lipsync-2, bytedance/latentsync,
+#       kwaivgi/kling-lip-sync, owner/name[:version]) — force that model for
+#       every scene (kept for A/B testing).
+# Input schemas differ per model (confirmed via Replicate schema/llms.txt) and
+# are built explicitly in replicate_lipsync(); Replicate rejects unknown inputs.
+LIPSYNC_MODEL = os.environ.get("LIPSYNC_MODEL", "auto").strip()
 
 # "Pinky Avatar" mode: character scenes go image + audio -> talking video in a
 # single Kling Avatar call (no xAI video, no separate lip-sync). Confirmed
@@ -118,18 +123,23 @@ KLING_MODEL = "kwaivgi/kling-lip-sync"
 KLING_AVATAR_MODEL = "kwaivgi/kling-avatar-v2"
 
 
-def _lipsync_max_seconds():
-    """Max clip length the active lip-sync model accepts (Kling caps at 10s;
-    others are bounded only by xAI's own 15s clip limit)."""
-    return 10.0 if LIPSYNC_MODEL == KLING_MODEL else 15.0
+def _pick_lipsync_model(clip_seconds):
+    """Auto policy: Kling for <=10s clips (within its 2-10s window), else the
+    unconstrained sync/lipsync-2."""
+    return KLING_MODEL if clip_seconds <= 10.0 else "sync/lipsync-2"
 
 
-def _lipsync_gen_resolution(resolution):
-    """Kling requires >=720p input video, so bump 480p up for the clip it will
-    lip-sync (the final output is still normalized to the chosen resolution)."""
-    if LIPSYNC_MODEL == KLING_MODEL and resolution == "480p":
-        return "720p"
-    return resolution
+def _min_720(resolution):
+    """Kling needs a >=720p input clip, so bump 480p up for the clip it will
+    lip-sync. The final video is still normalized to the chosen resolution."""
+    return "720p" if resolution == "480p" else resolution
+
+
+def _lipsync_model_display():
+    """Human-readable active policy for /health and the UI label."""
+    if LIPSYNC_MODEL == "auto":
+        return "auto (Kling <=10s, sync/lipsync-2 >10s)"
+    return LIPSYNC_MODEL
 
 # Resolve ffmpeg / ffprobe. In the Railway container the Dockerfile installs
 # them on PATH, so shutil.which is all that runs. The winget fallback below is
@@ -584,25 +594,24 @@ def _resolve_replicate_ref(client, model_name):
     return f"{model_name}:{version_id}" if version_id else model_name
 
 
-def replicate_lipsync(video_path, audio_path, replicate_api_key, out_dir):
-    """Run the configured lip-sync model on Replicate. The client uploads the
-    local files for us. The output lands in the job's out_dir so job cleanup
-    removes it.
+def replicate_lipsync(video_path, audio_path, replicate_api_key, out_dir, model):
+    """Run the given lip-sync `model` on Replicate. The client uploads the local
+    files for us. The output lands in the job's out_dir so job cleanup removes it.
 
-    Inputs are built per model — the two schemas are NOT identical:
+    Inputs are built per model — the schemas are NOT identical:
       sync/lipsync-2: {video, audio, sync_mode} (sync_mode='silence' preserves
         the video length by padding the shorter track)
-      bytedance/latentsync: {video, audio} only (no sync_mode; passing unknown
-        inputs would be rejected)
+      bytedance/latentsync: {video, audio}
+      kwaivgi/kling-lip-sync: {video_url, audio_file}
     """
     client = replicate.Client(api_token=replicate_api_key)
-    ref = _resolve_replicate_ref(client, LIPSYNC_MODEL)   # bare for official, +version for community
+    ref = _resolve_replicate_ref(client, model)   # bare for official, +version for community
     with open(video_path, "rb") as vf, open(audio_path, "rb") as af:
-        if LIPSYNC_MODEL == KLING_MODEL:
+        if model == KLING_MODEL:
             model_input = {"video_url": vf, "audio_file": af}
-        elif LIPSYNC_MODEL == "bytedance/latentsync":
+        elif model == "bytedance/latentsync":
             model_input = {"video": vf, "audio": af}
-        else:  # sync/lipsync-2 (default) — existing path, unchanged
+        else:  # sync/lipsync-2
             model_input = {"video": vf, "audio": af, "sync_mode": "silence"}
         output = client.run(ref, input=model_input)
     if isinstance(output, list):
@@ -676,7 +685,7 @@ async def root():
         "ffprobe": bool(FFPROBE),
         "s3": s3_enabled(),
         "storage": _storage_summary(),
-        "lipsync_model": LIPSYNC_MODEL,
+        "lipsync_model": _lipsync_model_display(),
     }
 
 
@@ -864,22 +873,27 @@ def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
             kling_avatar(scene["image_url"], speech, replicate_api_key, avatar_raw, prompt)
         normalize_clip(avatar_raw, norm, width, height)
     elif is_char:
-        max_s = _lipsync_max_seconds()
-        if dialogue and speech_len > max_s:
+        auto = LIPSYNC_MODEL == "auto"
+        # Forced Kling caps clips at 10s; otherwise xAI's own 15s cap applies
+        # (auto routes >10s clips to sync/lipsync-2, which has no length limit).
+        hard_max = 10.0 if (not auto and LIPSYNC_MODEL == KLING_MODEL) else 15.0
+        if dialogue and speech_len > hard_max:
             raise PipelineError(
                 f"Scene {idx + 1}: dialogue runs {speech_len:.1f}s of speech, but "
-                f"the '{LIPSYNC_MODEL}' lip-sync model caps clips at {int(max_s)}s. "
+                f"the selected lip-sync model caps clips at {int(hard_max)}s. "
                 "Shorten the dialogue or split it across two scenes."
             )
+        # Kling might be used (auto, or forced-Kling), and it needs a >=720p clip.
+        kling_possible = auto or LIPSYNC_MODEL == KLING_MODEL
         # Reuse the already-generated xAI clip if present (skip straight to
         # lip-sync); otherwise generate it.
         if not (reuse and _valid_media(raw_clip)):
             clip_secs = math.ceil(speech_len) if dialogue else scene.get("duration", 8)
             gen_res = resolution
-            if dialogue and LIPSYNC_MODEL == KLING_MODEL:
-                # Kling needs a 2-10s, >=720p clip to lip-sync.
-                clip_secs = max(2, min(10, clip_secs))
-                gen_res = _lipsync_gen_resolution(resolution)
+            if dialogue and kling_possible:
+                gen_res = _min_720(resolution)
+                if not auto:   # forced Kling also has the hard 2-10s clip window
+                    clip_secs = max(2, min(10, clip_secs))
             desc = (character_description or "").strip()
             prompt = (
                 (f"{desc} " if desc else "")
@@ -893,13 +907,24 @@ def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
             )
             _download(clip_url, raw_clip)
         if dialogue:
+            # Per-scene model choice by the clip's actual measured duration.
+            clip_dur = probe_duration(raw_clip)
+            if auto:
+                model = _pick_lipsync_model(clip_dur)
+                logger.info(
+                    "Scene %d lip-sync: clip=%.1fs -> %s (auto: <=10s Kling, "
+                    ">10s sync/lipsync-2)", idx + 1, clip_dur, model)
+            else:
+                model = LIPSYNC_MODEL
+                logger.info("Scene %d lip-sync: clip=%.1fs -> %s (forced)",
+                            idx + 1, clip_dur, model)
             _check_cancel(job_id)   # about to spend a Replicate lip-sync run
             lipsync_src = raw_clip
-            if LIPSYNC_MODEL == KLING_MODEL:
+            if model == KLING_MODEL:
                 # Enforce Kling's hard 2-10s clip window (absorbs xAI overshoot).
                 kclip = os.path.join(job_work, f"scene{idx}_kling.mp4")
                 lipsync_src = fit_clip_seconds(raw_clip, kclip, 2.0, 10.0)
-            source = replicate_lipsync(lipsync_src, speech, replicate_api_key, job_work)
+            source = replicate_lipsync(lipsync_src, speech, replicate_api_key, job_work, model)
         else:
             source = raw_clip
         normalize_clip(source, norm, width, height)
