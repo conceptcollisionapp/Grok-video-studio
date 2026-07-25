@@ -18,6 +18,7 @@ Every external call below is based on real, current docs:
                (handled via the `replicate` client for automatic file upload)
 """
 
+import io
 import json
 import logging
 import os
@@ -63,10 +64,20 @@ async def lifespan(_app):
 
 app = FastAPI(title="Grok Video Backend", lifespan=lifespan)
 
+# Only the real frontend (plus local dev) may call this API from a browser —
+# a wildcard here would let any site push uploads into our S3 bucket.
+# Override with a comma-separated CORS_ORIGINS env var if the domain changes.
+CORS_ORIGINS = [
+    o.strip() for o in os.environ.get(
+        "CORS_ORIGINS",
+        "https://grok-video-studio-alpha.vercel.app,http://localhost:3000",
+    ).split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=False,   # no cookies/auth headers in use
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -286,9 +297,10 @@ def slice_audio(src, start, duration, dst):
     ])
 
 
-def concat_clips(clip_paths, dst):
-    """Concatenate uniform clips (same codec/size/fps) with the concat demuxer."""
-    list_file = os.path.join(WORK_DIR, f"concat_{uuid.uuid4().hex}.txt")
+def concat_clips(clip_paths, dst, work_dir):
+    """Concatenate uniform clips (same codec/size/fps) with the concat demuxer.
+    The list file goes in the job's work_dir so job cleanup removes it."""
+    list_file = os.path.join(work_dir, f"concat_{uuid.uuid4().hex}.txt")
     with open(list_file, "w") as fh:
         for p in clip_paths:
             # concat demuxer needs forward slashes / escaped paths
@@ -300,13 +312,17 @@ def concat_clips(clip_paths, dst):
 
 
 def overlay_audio(video_src, audio_src, dst):
-    """Replace the video's audio with the full narration track (continuous audio)."""
+    """Replace the video's audio with the full narration track (continuous audio).
+
+    Deliberately NO -shortest: the full video must always survive. If narration
+    is shorter than the combined video, audio simply ends early; -shortest would
+    truncate trailing scenes to the narration's length.
+    """
     _run([
         FFMPEG, "-y",
         "-i", video_src, "-i", audio_src,
         "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-        "-shortest",
         dst,
     ])
 
@@ -392,11 +408,12 @@ def xai_generate_clip(image_url, prompt, duration, resolution, api_key):
     raise PipelineError("Timed out waiting for xAI video generation", status_code=504)
 
 
-def replicate_lipsync(video_path, audio_path, replicate_api_key):
+def replicate_lipsync(video_path, audio_path, replicate_api_key, out_dir):
     """Run sync/lipsync-2 on Replicate. The client uploads the local files for us.
 
     sync_mode='silence' preserves the video length (pads the shorter track),
     so a scene clip keeps its duration even if its audio slice is a bit short.
+    The output lands in the job's out_dir so job cleanup removes it.
     """
     client = replicate.Client(api_token=replicate_api_key)
     with open(video_path, "rb") as vf, open(audio_path, "rb") as af:
@@ -409,7 +426,7 @@ def replicate_lipsync(video_path, audio_path, replicate_api_key):
     if output is None:
         raise PipelineError("Replicate lipsync returned no output")
 
-    dst = os.path.join(WORK_DIR, f"lipsync_{uuid.uuid4().hex}.mp4")
+    dst = os.path.join(out_dir, f"lipsync_{uuid.uuid4().hex}.mp4")
     # replicate>=1.0 returns a FileOutput (has .read()); older/raw may be a URL str.
     if hasattr(output, "read"):
         with open(dst, "wb") as fh:
@@ -450,6 +467,8 @@ MIME_BY_EXT = {
     ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
     ".bmp": "image/bmp",
 }
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "10"))
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 
 @app.post("/upload")
@@ -469,16 +488,29 @@ def upload(request: Request, file: UploadFile = File(...)):
             status_code=400,
         )
 
+    # Enforce the size cap by reading at most cap+1 bytes — never trust the
+    # client's Content-Length. Cap is small enough to buffer in memory.
+    try:
+        data = file.file.read(MAX_UPLOAD_BYTES + 1)
+    finally:
+        file.file.close()
+    if len(data) > MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            {"status": "error",
+             "message": f"Image too large — max {MAX_UPLOAD_MB} MB."},
+            status_code=413,
+        )
+
     name = f"upload_{uuid.uuid4().hex}{ext}"
     content_type = MIME_BY_EXT.get(ext, "application/octet-stream")
     try:
         if s3_enabled():
-            url = store_upload_s3(file.file, name, content_type)
+            url = store_upload_s3(io.BytesIO(data), name, content_type)
             storage = "s3"
         else:
             dst = os.path.join(STATIC_DIR, name)
             with open(dst, "wb") as fh:
-                shutil.copyfileobj(file.file, fh)
+                fh.write(data)
             url = f"{str(request.base_url).rstrip('/')}/static/{name}"
             storage = "local"
     except Exception as e:  # noqa: BLE001 - surface storage failures clearly
@@ -486,8 +518,6 @@ def upload(request: Request, file: UploadFile = File(...)):
             {"status": "error", "message": f"Upload storage failed: {e}"},
             status_code=502,
         )
-    finally:
-        file.file.close()
 
     return {"status": "success", "url": url, "filename": name, "storage": storage}
 
@@ -585,7 +615,7 @@ def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
                 stage(f"Scene {idx + 1}/{n}: lip-syncing")
                 seg = os.path.join(job_work, f"scene{idx}_audio.wav")
                 slice_audio(narration, cursor, clip_len, seg)
-                source_clip = replicate_lipsync(raw_clip, seg, replicate_api_key)
+                source_clip = replicate_lipsync(raw_clip, seg, replicate_api_key, job_work)
             else:
                 source_clip = raw_clip           # b-roll: motion only, no lip-sync
 
@@ -597,7 +627,7 @@ def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
         # --- 4. concat + overlay the FULL narration ------------------------ #
         stage("Combining clips + narration")
         combined_silent = os.path.join(job_work, "combined_silent.mp4")
-        concat_clips(final_clips, combined_silent)
+        concat_clips(final_clips, combined_silent, job_work)
 
         final_name = f"{job_id}.mp4"
         if s3_enabled():
