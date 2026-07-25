@@ -245,9 +245,17 @@ class PipelineError(Exception):
 # --------------------------------------------------------------------------- #
 # ffmpeg helpers
 # --------------------------------------------------------------------------- #
-def _run(cmd):
-    """Run a subprocess, raising PipelineError with stderr on failure."""
-    result = subprocess.run(cmd, capture_output=True, text=True)
+def _run(cmd, timeout=300):
+    """Run a subprocess, raising PipelineError with stderr on failure.
+
+    The timeout stops a hung ffmpeg from wedging a job as 'processing' forever
+    (and permanently eating one of the few worker slots)."""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise PipelineError(
+            f"{os.path.basename(cmd[0])} timed out after {timeout}s"
+        )
     if result.returncode != 0:
         raise PipelineError(
             f"Command failed ({os.path.basename(cmd[0])}): "
@@ -342,7 +350,7 @@ def xai_tts(text, voice_id, api_key, dst):
             "Content-Type": "application/json",
         },
         json={
-            "text": text[:15000],          # documented max length
+            "text": text,                  # length validated in /generate (max 15,000)
             "language": "en",
             "voice_id": voice_id or "eve",
             "output_format": {"codec": "mp3", "sample_rate": 24000, "bit_rate": 128000},
@@ -389,14 +397,38 @@ def xai_generate_clip(image_url, prompt, duration, resolution, api_key):
     if not request_id:
         raise PipelineError(f"xAI video: no request_id in response: {start.text[:300]}")
 
+    consecutive_failures = 0
     for _ in range(60):                        # up to ~5 min per clip
         time.sleep(5)
-        poll = requests.get(
-            XAI_VIDEO_STATUS_URL.format(request_id=request_id),
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=30,
-        )
-        data = poll.json()
+        # Transient network blips / proxy errors / non-JSON bodies shouldn't
+        # kill a multi-minute job — retry a few times before giving up.
+        try:
+            poll = requests.get(
+                XAI_VIDEO_STATUS_URL.format(request_id=request_id),
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            consecutive_failures += 1
+            if consecutive_failures >= 5:
+                raise PipelineError(f"Lost contact with xAI while polling: {e}")
+            continue
+        if poll.status_code in (401, 403):
+            # Auth won't fix itself — fail fast instead of spinning 5 minutes.
+            raise PipelineError(
+                f"xAI rejected the API key while polling ({poll.status_code})",
+                status_code=poll.status_code,
+            )
+        try:
+            data = poll.json()
+        except ValueError:
+            consecutive_failures += 1
+            if consecutive_failures >= 5:
+                raise PipelineError(
+                    f"xAI poll kept returning non-JSON (HTTP {poll.status_code})"
+                )
+            continue
+        consecutive_failures = 0
         status = data.get("status")
         if status == "done":
             url = (data.get("video") or {}).get("url")
@@ -654,9 +686,11 @@ def _run_pipeline(job_id, base_url, script, api_key, replicate_api_key,
             message="Video generated with continuous narration + lip-sync",
         )
     except PipelineError as e:
+        close_last_stage()   # record the failing stage's duration too
         _set_job(job_id, status="error", stage="Error", message=e.message,
                  elapsed_seconds=round(time.time() - t0, 1), stage_timings=list(timings))
     except Exception as e:  # noqa: BLE001 - surface anything unexpected clearly
+        close_last_stage()
         _set_job(job_id, status="error", stage="Error", message=f"Unexpected error: {e}",
                  elapsed_seconds=round(time.time() - t0, 1), stage_timings=list(timings))
     finally:
@@ -712,6 +746,22 @@ def generate(
                         "needs a publicly reachable image URL."},
             status_code=400,
         )
+    # Narration comes from scene dialogue — reject empty or over-limit scripts
+    # here instead of silently narrating fallbacks or truncating mid-sentence.
+    if not (script or "").strip():
+        return JSONResponse(
+            {"status": "error",
+             "message": "No dialogue provided. Add dialogue to at least one "
+                        "scene — narration is generated from scene dialogue."},
+            status_code=400,
+        )
+    if len(script) > 15000:
+        return JSONResponse(
+            {"status": "error",
+             "message": f"Script too long ({len(script):,} chars; xAI TTS max "
+                        "is 15,000). Shorten the scene dialogue."},
+            status_code=400,
+        )
 
     # --- start the background pipeline, return the job handle -------------- #
     job_id = str(uuid.uuid4())
@@ -733,8 +783,12 @@ def job_status(job_id: str):
     """
     job = _get_job(job_id)
     if job is None:
+        # Jobs live in memory, so a restart/redeploy mid-job loses them.
         return JSONResponse(
-            {"status": "error", "message": "Unknown job_id"}, status_code=404
+            {"status": "error",
+             "message": "Job not found — the server may have restarted and "
+                        "lost in-progress jobs. Please generate again."},
+            status_code=404,
         )
     if job.get("status") == "processing" and job.get("started_at"):
         job["elapsed_seconds"] = round(time.time() - job["started_at"], 1)

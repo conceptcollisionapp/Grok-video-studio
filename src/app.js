@@ -115,11 +115,15 @@ function App() {
     }
   };
 
+  // xAI clips are 1-15s; clamp here so the UI never shows a length the
+  // backend would silently shorten.
+  const clampDuration = (d) => Math.max(1, Math.min(15, +d || 8));
+
   // Re-lay start/end sequentially from each scene's duration, in array order.
   const recomputeTiming = (list) => {
     let cursor = 0;
     return list.map(s => {
-      const duration = s.duration || 8;
+      const duration = clampDuration(s.duration);
       const start = cursor;
       const end = start + duration;
       cursor = end;
@@ -227,16 +231,25 @@ function App() {
       return;
     }
 
-    setStatus('Starting…');
-    setGeneratedVideoUrl('');
-    setStageTimings([]);
-    setTotalSeconds(null);
-
     // One continuous narration track = every scene's dialogue joined in order.
+    // No fallback to Notes or a canned string — narration is scene dialogue only.
     const fullScript = scenes
       .map(s => (s.dialogue || '').trim())
       .filter(Boolean)
       .join(' ');
+    if (!fullScript) {
+      setStatus('Add dialogue to at least one scene — narration is generated from scene dialogue.');
+      return;
+    }
+    if (fullScript.length > 15000) {
+      setStatus(`Script too long (${fullScript.length.toLocaleString()} chars; max 15,000). Shorten the scene dialogue.`);
+      return;
+    }
+
+    setStatus('Starting…');
+    setGeneratedVideoUrl('');
+    setStageTimings([]);
+    setTotalSeconds(null);
 
     // Per-scene payload the backend needs for the pipeline.
     const scenePayload = scenes.map(s => ({
@@ -247,7 +260,7 @@ function App() {
     }));
 
     const formData = new FormData();
-    formData.append('script', fullScript || script || 'A news anchor delivering a report with graphs');
+    formData.append('script', fullScript);
     formData.append('api_key', apiKey);
     formData.append('replicate_api_key', replicateApiKey);
     formData.append('scenes', JSON.stringify(scenePayload));
@@ -407,17 +420,17 @@ function App() {
 
           End <input type="number" value={s.end || (s.start + s.duration)} onChange={e => {
             const ns = [...scenes];
-            ns[i].end = +e.target.value;
-            ns[i].duration = ns[i].end - ns[i].start;
-            setScenes(ns);
-          }} style={{width:'60px'}} />s
-
-          Duration <input type="number" value={s.duration} onChange={e => {
-            const ns = [...scenes];
-            ns[i].duration = +e.target.value;
+            ns[i].duration = clampDuration(+e.target.value - ns[i].start);
             ns[i].end = ns[i].start + ns[i].duration;
             setScenes(ns);
           }} style={{width:'60px'}} />s
+
+          Duration <input type="number" min="1" max="15" value={s.duration} onChange={e => {
+            const ns = [...scenes];
+            ns[i].duration = clampDuration(e.target.value);
+            ns[i].end = ns[i].start + ns[i].duration;
+            setScenes(ns);
+          }} style={{width:'60px'}} />s <small>(1–15s, xAI limit)</small>
 
           <button onClick={() => deleteScene(i)} style={{marginTop: '8px'}}>Delete Scene</button>
         </div>
