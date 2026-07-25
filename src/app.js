@@ -96,6 +96,16 @@ function App() {
   };
   useEffect(() => { refreshLipsyncModel(); }, []);
 
+  // While a job is running the browser does the polling, so leaving/closing the
+  // tab (or a mobile browser suspending it) can interrupt it and lose the
+  // result. Warn on attempts to leave the page mid-generation.
+  useEffect(() => {
+    if (!generating) return;
+    const handler = (e) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [generating]);
+
   const toggleMode = () => setDarkMode(!darkMode);
 
   const uploadFile = async (file) => {
@@ -744,6 +754,11 @@ function App() {
           ⏹ Stop
         </button>
       )}
+      {generating && (
+        <p style={{ color: '#ffb347', marginTop: '12px', fontWeight: 'bold' }}>
+          ⚠️ Keep this screen on and stay in the app until it finishes. On mobile, leaving or locking the screen can interrupt generation and lose the result.
+        </p>
+      )}
 
       {generatedVideoUrl && (
         <div style={{ marginTop: '30px' }}>
@@ -805,6 +820,9 @@ function App() {
                 ⚠️ One or more images may be low resolution or an unusual format — results may not come out correctly.
               </p>
             )}
+            <p style={{ color: '#ffb347' }}>
+              ⏳ This runs for several minutes. <strong>Keep this tab open and your screen awake</strong> until it finishes — on mobile especially, leaving the app or locking the screen can interrupt it and you may lose the result.
+            </p>
             <p style={{ background: darkMode ? '#111' : '#eee', borderRadius: '8px', padding: '8px 12px' }}>
               🎙 Active lip-sync model: <strong>{lipsyncModel || 'unavailable'}</strong>
             </p>
