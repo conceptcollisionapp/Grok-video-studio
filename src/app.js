@@ -64,14 +64,25 @@ function App() {
   const [generating, setGenerating] = useState(false);
   const [lipsyncModel, setLipsyncModel] = useState(null);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
-  // Fixed anchor image + spoken outro for Pinky Newscaster / Pinky Avatar.
+  // Fixed anchor image + spoken outro. Pinky Newscaster (lip-sync) can use a
+  // wide scene; Pinky Avatar (kling-avatar-v2) needs a face, so it keeps its
+  // OWN anchor/outro images (portraits) — hence separate per-mode state.
   const [anchorImage, setAnchorImage] = useState(() => localStorage.getItem('anchorImage') ?? DEFAULT_ANCHOR_IMAGE);
+  const [avatarAnchorImage, setAvatarAnchorImage] = useState(() => localStorage.getItem('avatarAnchorImage') ?? '');
   const [anchorBusy, setAnchorBusy] = useState(false);
   const [outroEnabled, setOutroEnabled] = useState(() => (localStorage.getItem('outroEnabled') ?? 'true') === 'true');
   const [outroImage, setOutroImage] = useState(() => localStorage.getItem('outroImage') ?? DEFAULT_OUTRO_IMAGE);
+  const [avatarOutroImage, setAvatarOutroImage] = useState(() => localStorage.getItem('avatarOutroImage') ?? '');
   const [outroDialogue, setOutroDialogue] = useState(() => localStorage.getItem('outroDialogue') ?? DEFAULT_OUTRO_TEXT);
   const [outroBusy, setOutroBusy] = useState(false);
   const jobRef = useRef(null);
+
+  // Active anchor/outro image for the current mode (Avatar has its own).
+  const isAvatarMode = mode === 'avatar';
+  const activeAnchor = isAvatarMode ? avatarAnchorImage : anchorImage;
+  const setActiveAnchor = isAvatarMode ? setAvatarAnchorImage : setAnchorImage;
+  const activeOutroImage = isAvatarMode ? avatarOutroImage : outroImage;
+  const setActiveOutroImage = isAvatarMode ? setAvatarOutroImage : setOutroImage;
 
   // Real xAI TTS voice IDs (source: xAI TTS docs / GET /v1/tts/voices)
   const grokVoices = [
@@ -96,10 +107,12 @@ function App() {
     localStorage.setItem('scenes', JSON.stringify(scenes));
     localStorage.setItem('videoHistory', JSON.stringify(videoHistory));
     localStorage.setItem('anchorImage', anchorImage);
+    localStorage.setItem('avatarAnchorImage', avatarAnchorImage);
     localStorage.setItem('outroImage', outroImage);
+    localStorage.setItem('avatarOutroImage', avatarOutroImage);
     localStorage.setItem('outroDialogue', outroDialogue);
     localStorage.setItem('outroEnabled', outroEnabled);
-  }, [mode, apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, resolution, scenes, videoHistory, anchorImage, outroImage, outroDialogue, outroEnabled]);
+  }, [mode, apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, resolution, scenes, videoHistory, anchorImage, avatarAnchorImage, outroImage, avatarOutroImage, outroDialogue, outroEnabled]);
 
   // One-time cleanup of keys from removed features (they stored blob: URLs,
   // which are invalid after a reload anyway).
@@ -160,7 +173,12 @@ function App() {
     setStageTimings([]);
     setTotalSeconds(null);
     if (mode === 'open') setCharacterDescription('');
-    if (mode === 'pinky' || mode === 'avatar') {
+    if (mode === 'avatar') {
+      setAvatarAnchorImage('');   // portrait is user-supplied for Avatar
+      setAvatarOutroImage('');
+      setOutroDialogue(DEFAULT_OUTRO_TEXT);
+      setOutroEnabled(true);
+    } else if (mode === 'pinky') {
       setAnchorImage(DEFAULT_ANCHOR_IMAGE);
       setOutroImage(DEFAULT_OUTRO_IMAGE);
       setOutroDialogue(DEFAULT_OUTRO_TEXT);
@@ -378,12 +396,16 @@ function App() {
     }
     if (isLocked) {
       // Pinky modes: character scenes use the Anchor Image; b-roll uses its own.
-      if (scenes.some(s => s.isCharacterScene) && !isPublicUrl(anchorImage)) {
-        setStatus('Add an Anchor Image — it drives every character scene in this mode.');
+      if (scenes.some(s => s.isCharacterScene) && !isPublicUrl(activeAnchor)) {
+        setStatus(isAvatarMode
+          ? 'Upload a front-facing Pinky portrait as the Anchor Image — Avatar needs a face.'
+          : 'Add an Anchor Image — it drives every character scene in this mode.');
         return;
       }
-      if (outroEnabled && !isPublicUrl(outroImage)) {
-        setStatus('The outro needs an image, or turn the outro off.');
+      if (outroEnabled && !isPublicUrl(activeOutroImage)) {
+        setStatus(isAvatarMode
+          ? 'The outro needs a Pinky portrait image (Avatar needs a face), or turn the outro off.'
+          : 'The outro needs an image, or turn the outro off.');
         return;
       }
       const badB = scenes.findIndex(s => !s.isCharacterScene && !isPublicUrl(s.imageUrl || s.image));
@@ -419,9 +441,9 @@ function App() {
     // Images that will actually be used, for the low-res/aspect warning.
     const usedImages = isLocked
       ? [
-          ...(scenes.some(s => s.isCharacterScene) ? [anchorImage] : []),
+          ...(scenes.some(s => s.isCharacterScene) ? [activeAnchor] : []),
           ...scenes.filter(s => !s.isCharacterScene).map(s => s.imageUrl || s.image),
-          ...(outroEnabled ? [outroImage] : []),
+          ...(outroEnabled ? [activeOutroImage] : []),
         ].filter(Boolean)
       : scenes.map(s => s.imageUrl || s.image).filter(Boolean);
 
@@ -445,15 +467,15 @@ function App() {
     // Per-scene payload. In Pinky modes, character scenes use the fixed Anchor
     // Image; b-roll keeps its own; a spoken outro is appended if enabled.
     const scenePayload = scenes.map(s => ({
-      image_url: (isLocked && s.isCharacterScene) ? anchorImage : (s.imageUrl || s.image || ''),
+      image_url: (isLocked && s.isCharacterScene) ? activeAnchor : (s.imageUrl || s.image || ''),
       dialogue: s.dialogue || '',
       // clamp here too — a mid-edit raw value may not have blurred yet
       duration: clampDuration(s.duration),
       isCharacterScene: !!s.isCharacterScene
     }));
-    if (isLocked && outroEnabled && outroImage) {
+    if (isLocked && outroEnabled && activeOutroImage) {
       scenePayload.push({
-        image_url: outroImage,
+        image_url: activeOutroImage,
         dialogue: outroDialogue || '',
         duration: clampDuration(8),
         isCharacterScene: true
@@ -471,7 +493,7 @@ function App() {
       characterDescription,
       voiceId: selectedVoice,
       resolution,
-      anchorImage, outroImage, outroDialogue, outroEnabled
+      anchorImage: activeAnchor, outroImage: activeOutroImage, outroDialogue, outroEnabled
     };
 
     const formData = new FormData();
@@ -565,8 +587,14 @@ function App() {
     if (cfg.characterDescription != null) setCharacterDescription(cfg.characterDescription);
     if (cfg.voiceId) setSelectedVoice(cfg.voiceId);
     if (cfg.resolution) setResolution(cfg.resolution);
-    if (cfg.anchorImage != null) setAnchorImage(cfg.anchorImage);
-    if (cfg.outroImage != null) setOutroImage(cfg.outroImage);
+    // Restore the anchor/outro into the mode-appropriate slot.
+    if (cfg.modeId === 'avatar') {
+      if (cfg.anchorImage != null) setAvatarAnchorImage(cfg.anchorImage);
+      if (cfg.outroImage != null) setAvatarOutroImage(cfg.outroImage);
+    } else {
+      if (cfg.anchorImage != null) setAnchorImage(cfg.anchorImage);
+      if (cfg.outroImage != null) setOutroImage(cfg.outroImage);
+    }
     if (cfg.outroDialogue != null) setOutroDialogue(cfg.outroDialogue);
     if (cfg.outroEnabled != null) setOutroEnabled(cfg.outroEnabled);
   };
@@ -779,11 +807,14 @@ function App() {
           )}
 
           {/* Fixed anchor image (every character scene) + spoken outro. */}
-          <h3 style={{ marginBottom: '4px' }}>Anchor Image</h3>
-          <p style={{ opacity: 0.7, fontSize: '0.85em', margin: '0 0 8px' }}>Used automatically for every character/talking scene in this mode.</p>
-          {anchorImage && <img src={anchorImage} alt="anchor" style={{ maxWidth: '150px', display: 'block', borderRadius: '6px', marginBottom: '6px' }} />}
-          <input value={anchorImage} onChange={e => setAnchorImage(e.target.value)} placeholder="Public image URL" style={{ width: '100%', padding: '8px', margin: '0 0 6px', boxSizing: 'border-box' }} />
-          <input type="file" accept="image/*" onChange={e => uploadProjectImage(e.target.files[0], setAnchorImage, setAnchorBusy)} />
+          <h3 style={{ marginBottom: '4px' }}>Anchor Image{isAvatarMode ? ' (Pinky portrait)' : ''}</h3>
+          <p style={{ opacity: 0.7, fontSize: '0.85em', margin: '0 0 8px' }}>
+            Used automatically for every character/talking scene in this mode.
+            {isAvatarMode && <span style={{ color: '#ffb347' }}> Avatar needs a clear, front-facing face — upload a close Pinky portrait, not a wide scene.</span>}
+          </p>
+          {activeAnchor && <img src={activeAnchor} alt="anchor" style={{ maxWidth: '150px', display: 'block', borderRadius: '6px', marginBottom: '6px' }} />}
+          <input value={activeAnchor} onChange={e => setActiveAnchor(e.target.value)} placeholder={isAvatarMode ? 'Front-facing Pinky portrait URL' : 'Public image URL'} style={{ width: '100%', padding: '8px', margin: '0 0 6px', boxSizing: 'border-box' }} />
+          <input type="file" accept="image/*" onChange={e => uploadProjectImage(e.target.files[0], setActiveAnchor, setAnchorBusy)} />
           {anchorBusy && <span style={{ marginLeft: '10px' }}>⏳ Uploading…</span>}
 
           <h3 style={{ marginBottom: '4px', marginTop: '18px' }}>Outro Scene</h3>
@@ -793,9 +824,10 @@ function App() {
           </label>
           {outroEnabled && (
             <>
-              {outroImage && <img src={outroImage} alt="outro" style={{ maxWidth: '150px', display: 'block', borderRadius: '6px', marginBottom: '6px' }} />}
-              <input value={outroImage} onChange={e => setOutroImage(e.target.value)} placeholder="Outro image URL" style={{ width: '100%', padding: '8px', margin: '0 0 6px', boxSizing: 'border-box' }} />
-              <input type="file" accept="image/*" onChange={e => uploadProjectImage(e.target.files[0], setOutroImage, setOutroBusy)} />
+              {isAvatarMode && <p style={{ color: '#ffb347', fontSize: '0.85em', margin: '0 0 6px' }}>Avatar speaks the outro, so this image also needs a Pinky face (not the text card).</p>}
+              {activeOutroImage && <img src={activeOutroImage} alt="outro" style={{ maxWidth: '150px', display: 'block', borderRadius: '6px', marginBottom: '6px' }} />}
+              <input value={activeOutroImage} onChange={e => setActiveOutroImage(e.target.value)} placeholder={isAvatarMode ? 'Pinky portrait for the outro' : 'Outro image URL'} style={{ width: '100%', padding: '8px', margin: '0 0 6px', boxSizing: 'border-box' }} />
+              <input type="file" accept="image/*" onChange={e => uploadProjectImage(e.target.files[0], setActiveOutroImage, setOutroBusy)} />
               {outroBusy && <span style={{ marginLeft: '10px' }}>⏳ Uploading…</span>}
               <textarea value={outroDialogue} onChange={e => setOutroDialogue(e.target.value)} rows="2" placeholder="Outro spoken line" style={{ width: '100%', padding: '10px', margin: '8px 0 0', boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5' }} />
             </>
