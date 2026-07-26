@@ -10,7 +10,8 @@ const PINKY_AVATAR_PROMPT = "A pink paper-slip cartoon news anchor delivering " 
 // Pinky Avatar: a fixed anchor image drives every character scene, plus an
 // optional spoken outro. Images are user-supplied portraits (Avatar needs a
 // face); the outro line has a sensible default.
-const DEFAULT_OUTRO_TEXT = "Check out layoffhedge.com for more information.";
+const DEFAULT_OUTRO_TEXT = "Visit layoffhedge.com for more information.";
+const OLD_OUTRO_TEXT = "Check out layoffhedge.com for more information.";
 
 // Fixed default anchor/outro images for Pinky Avatar — permanent GitHub-hosted
 // URLs (never presigned/expiring).
@@ -89,7 +90,11 @@ function App() {
   const [anchorBusy, setAnchorBusy] = useState(false);
   const [outroEnabled, setOutroEnabled] = useState(() => (localStorage.getItem('outroEnabled') ?? 'true') === 'true');
   const [avatarOutroImage, setAvatarOutroImage] = useState(() => resolveAvatarImg(localStorage.getItem('avatarOutroImage'), DEFAULT_AVATAR_OUTRO));
-  const [outroDialogue, setOutroDialogue] = useState(() => localStorage.getItem('outroDialogue') ?? DEFAULT_OUTRO_TEXT);
+  const [outroDialogue, setOutroDialogue] = useState(() => {
+    // Migrate the previous default to the new one; keep any custom edit as-is.
+    const v = localStorage.getItem('outroDialogue');
+    return (v == null || v === OLD_OUTRO_TEXT) ? DEFAULT_OUTRO_TEXT : v;
+  });
   const [outroBusy, setOutroBusy] = useState(false);
   const jobRef = useRef(null);
 
