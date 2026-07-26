@@ -641,6 +641,13 @@ def kling_avatar(image_url, audio_path, replicate_api_key, dst, prompt=None):
         model_input = {"image": image_url, "audio": af}
         if prompt:
             model_input["prompt"] = prompt
+        # DIAGNOSTIC: log the exact payload sent to kling-avatar-v2 (the audio
+        # is a file handle uploaded by the client, so log its path + size).
+        _audio_bytes = os.path.getsize(audio_path) if os.path.exists(audio_path) else -1
+        logger.info(
+            "Kling Avatar payload -> ref=%s | image=%s | audio=%s (%d bytes) | prompt=%r",
+            ref, image_url, os.path.basename(audio_path), _audio_bytes, prompt,
+        )
         output = client.run(ref, input=model_input)
     if isinstance(output, list):
         output = output[0] if output else None
