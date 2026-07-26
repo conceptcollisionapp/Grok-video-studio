@@ -429,7 +429,8 @@ function App() {
     const isPublicUrl = (u) => !!u && !u.startsWith('blob:');
 
     // Character scenes (incl. a spoken outro) need a Replicate key.
-    const hasCharacterScene = scenes.some(s => s.isCharacterScene) || (isLocked && outroEnabled);
+    // The outro is now b-roll, so only real character scenes need Replicate.
+    const hasCharacterScene = scenes.some(s => s.isCharacterScene);
     if (hasCharacterScene && !replicateApiKey) {
       setStatus("Replicate API key required for character scenes.");
       return;
@@ -450,9 +451,8 @@ function App() {
         return;
       }
       if (outroEnabled && !isPublicUrl(activeOutroImage)) {
-        setStatus(isAvatarMode
-          ? 'The outro needs a Pinky portrait image (Avatar needs a face), or turn the outro off.'
-          : 'The outro needs an image, or turn the outro off.');
+        // Outro is b-roll now — any image works, no face required.
+        setStatus('The outro needs an image, or turn the outro off.');
         return;
       }
       const badB = scenes.findIndex(s => !s.isCharacterScene && !isPublicUrl(s.imageUrl || s.image));
@@ -522,11 +522,14 @@ function App() {
       motion: s.motion || 'panzoom'
     }));
     if (isLocked && outroEnabled && activeOutroImage) {
+      // Outro is a narrated B-ROLL close: TTS the line, hold the image with
+      // pan/zoom for its duration. Never sent to kling-avatar (no face needed).
       scenePayload.push({
         image_url: activeOutroImage,
         dialogue: outroDialogue || '',
         duration: clampDuration(8),
-        isCharacterScene: true
+        isCharacterScene: false,
+        motion: 'panzoom'
       });
     }
 
@@ -862,15 +865,17 @@ function App() {
           {anchorBusy && <span style={{ marginLeft: '10px' }}>⏳ Uploading…</span>}
 
           <h3 style={{ marginBottom: '4px', marginTop: '18px' }}>Outro Scene</h3>
-          <label style={{ display: 'block', marginBottom: '8px' }}>
+          <label style={{ display: 'block', marginBottom: '4px' }}>
             <input type="checkbox" checked={outroEnabled} onChange={e => setOutroEnabled(e.target.checked)} />{' '}
-            Include a spoken outro at the end (Pinky says the line below)
+            Add a narrated outro at the end
           </label>
+          <p style={{ opacity: 0.7, fontSize: '0.85em', margin: '0 0 8px' }}>
+            A narrated b-roll close: the line below is spoken over this image (held with a gentle pan/zoom). Any graphic or text card works — it's not a talking scene, so no face needed.
+          </p>
           {outroEnabled && (
             <>
-              {isAvatarMode && <p style={{ color: '#ffb347', fontSize: '0.85em', margin: '0 0 6px' }}>Avatar speaks the outro, so this image also needs a Pinky face (not the text card).</p>}
               {activeOutroImage && <img src={activeOutroImage} alt="outro" style={{ maxWidth: '150px', display: 'block', borderRadius: '6px', marginBottom: '6px' }} />}
-              <input value={activeOutroImage} onChange={e => setActiveOutroImage(e.target.value)} placeholder={isAvatarMode ? 'Pinky portrait for the outro' : 'Outro image URL'} style={{ width: '100%', padding: '8px', margin: '0 0 6px', boxSizing: 'border-box' }} />
+              <input value={activeOutroImage} onChange={e => setActiveOutroImage(e.target.value)} placeholder="Outro image URL (graphic or text card is fine)" style={{ width: '100%', padding: '8px', margin: '0 0 6px', boxSizing: 'border-box' }} />
               <input type="file" accept="image/*" onChange={e => uploadProjectImage(e.target.files[0], setActiveOutroImage, setOutroBusy)} />
               {outroBusy && <span style={{ marginLeft: '10px' }}>⏳ Uploading…</span>}
               <textarea value={outroDialogue} onChange={e => setOutroDialogue(e.target.value)} rows="2" placeholder="Outro spoken line" style={{ width: '100%', padding: '10px', margin: '8px 0 0', boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5' }} />
