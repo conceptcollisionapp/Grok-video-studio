@@ -17,6 +17,22 @@ const BLANK_SCENE = () => ({
   start: 0, duration: 8, end: 8, image: null, imagePreview: null, imageUrl: ''
 });
 
+// Real xAI TTS speech tags (verified against xAI docs). Wrap tags surround the
+// selected text; point tags insert at the cursor. (No <emphasis>/[sigh]/[breath]
+// in xAI — emphasis is <loud>, sigh/breath map to [exhale]/[inhale].)
+const SPEECH_TAGS = [
+  { label: 'pause', title: '[pause]', text: '[pause]' },
+  { label: 'long pause', title: '[long-pause]', text: '[long-pause]' },
+  { label: 'slow', title: '<slow>…</slow>', open: '<slow>', close: '</slow>' },
+  { label: 'fast', title: '<fast>…</fast>', open: '<fast>', close: '</fast>' },
+  { label: 'emphasis', title: 'emphasis = <loud>…</loud>', open: '<loud>', close: '</loud>' },
+  { label: 'soft', title: '<soft>…</soft>', open: '<soft>', close: '</soft>' },
+  { label: 'whisper', title: '<whisper>…</whisper>', open: '<whisper>', close: '</whisper>' },
+  { label: 'laugh', title: '[laugh]', text: '[laugh]' },
+  { label: 'sigh', title: 'sigh = [exhale]', text: '[exhale]' },
+  { label: 'breath', title: 'breath = [inhale]', text: '[inhale]' },
+];
+
 function App() {
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('darkMode');
@@ -32,6 +48,7 @@ function App() {
   const [script, setScript] = useState(() => localStorage.getItem('script') || '');
   const [characterDescription, setCharacterDescription] = useState(() => localStorage.getItem('characterDescription') || '');
   const [selectedVoice, setSelectedVoice] = useState(() => localStorage.getItem('voiceId') || 'ara');
+  const [avatarVoice, setAvatarVoice] = useState(() => localStorage.getItem('avatarVoice') || 'rex');
   const [resolution, setResolution] = useState(() => localStorage.getItem('resolution') || '720p');
   const [scenes, setScenes] = useState(() => JSON.parse(localStorage.getItem('scenes') || '[{"id":1,"description":"News Anchor","dialogue":"","isCharacterScene":true,"start":0,"duration":12,"end":12,"image":null,"imageUrl":""}]'));
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState('');
@@ -44,6 +61,7 @@ function App() {
   const [playingUrl, setPlayingUrl] = useState(null);
   const [selectedIds, setSelectedIds] = useState([]);
   const jobInputsRef = useRef(null);   // snapshot of the running job's inputs
+  const dialogueRefs = useRef({});     // per-scene dialogue <textarea> nodes
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [imageWarning, setImageWarning] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -64,6 +82,9 @@ function App() {
   const setActiveAnchor = setAvatarAnchorImage;
   const activeOutroImage = avatarOutroImage;
   const setActiveOutroImage = setAvatarOutroImage;
+  // Voice is a picker in both modes (Avatar defaults to rex, not locked).
+  const activeVoice = isAvatarMode ? avatarVoice : selectedVoice;
+  const setActiveVoice = isAvatarMode ? setAvatarVoice : setSelectedVoice;
 
   // Real xAI TTS voice IDs (source: xAI TTS docs / GET /v1/tts/voices)
   const grokVoices = [
@@ -84,6 +105,7 @@ function App() {
     localStorage.setItem('script', script);
     localStorage.setItem('characterDescription', characterDescription);
     localStorage.setItem('voiceId', selectedVoice);
+    localStorage.setItem('avatarVoice', avatarVoice);
     localStorage.setItem('resolution', resolution);
     localStorage.setItem('scenes', JSON.stringify(scenes));
     localStorage.setItem('videoHistory', JSON.stringify(videoHistory));
@@ -91,7 +113,7 @@ function App() {
     localStorage.setItem('avatarOutroImage', avatarOutroImage);
     localStorage.setItem('outroDialogue', outroDialogue);
     localStorage.setItem('outroEnabled', outroEnabled);
-  }, [mode, apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, resolution, scenes, videoHistory, avatarAnchorImage, avatarOutroImage, outroDialogue, outroEnabled]);
+  }, [mode, apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, avatarVoice, resolution, scenes, videoHistory, avatarAnchorImage, avatarOutroImage, outroDialogue, outroEnabled]);
 
   // One-time cleanup of keys from removed features (they stored blob: URLs,
   // which are invalid after a reload anyway).
@@ -255,6 +277,29 @@ function App() {
         ? { ...s, image: null, imagePreview: null, uploadError: '', uploading: false }
         : s
     ));
+  };
+
+  // Insert an xAI speech tag into scene `index`'s dialogue. Wrap tags surround
+  // the current selection (empty pair at cursor if nothing selected); point
+  // tags insert at the cursor. Selection/cursor is restored after re-render.
+  const applyTag = (index, tag) => {
+    const el = dialogueRefs.current[index];
+    if (!el) return;
+    const start = el.selectionStart, end = el.selectionEnd;
+    const val = el.value;
+    let insert, caretStart, caretEnd;
+    if (tag.open) {
+      const sel = val.slice(start, end);
+      insert = tag.open + sel + tag.close;
+      caretStart = start + tag.open.length;
+      caretEnd = caretStart + sel.length;
+    } else {
+      insert = tag.text;
+      caretStart = caretEnd = start + insert.length;
+    }
+    const next = val.slice(0, start) + insert + val.slice(end);
+    setScenes(prev => prev.map((s, i) => i === index ? { ...s, dialogue: next } : s));
+    requestAnimationFrame(() => { try { el.focus(); el.setSelectionRange(caretStart, caretEnd); } catch (e) {} });
   };
 
   // Rough spoken-duration estimate from dialogue text (~150 wpm average
@@ -466,7 +511,7 @@ function App() {
       modeId: mode,
       modeLabel: isAvatar ? 'Pinky Avatar' : 'Open Studio',
       characterDescription,
-      voiceId: selectedVoice,
+      voiceId: activeVoice,
       resolution,
       anchorImage: activeAnchor, outroImage: activeOutroImage, outroDialogue, outroEnabled
     };
@@ -478,7 +523,7 @@ function App() {
     formData.append('scenes', JSON.stringify(scenePayload));
     // Pinky Avatar locks the voice + character and uses the avatar pipeline;
     // Open Studio uses the user's config and the lip-sync pipeline.
-    formData.append('voice_id', isAvatar ? 'rex' : selectedVoice);
+    formData.append('voice_id', activeVoice);
     formData.append('resolution', resolution);
     formData.append('character_description', isAvatar ? PINKY_AVATAR_PROMPT : characterDescription.trim());
     formData.append('character_pipeline', isAvatar ? 'avatar' : 'lipsync');
@@ -556,7 +601,7 @@ function App() {
     if (cfg.scenes) setScenes(cfg.scenes);
     if (cfg.modeId) setMode(cfg.modeId);
     if (cfg.characterDescription != null) setCharacterDescription(cfg.characterDescription);
-    if (cfg.voiceId) setSelectedVoice(cfg.voiceId);
+    if (cfg.voiceId) { if (cfg.modeId === 'avatar') setAvatarVoice(cfg.voiceId); else setSelectedVoice(cfg.voiceId); }
     if (cfg.resolution) setResolution(cfg.resolution);
     // Anchor/outro only apply to Avatar mode.
     if (cfg.modeId === 'avatar') {
@@ -741,17 +786,21 @@ function App() {
       <input type="password" placeholder="xAI API Key (saved)" value={apiKey} onChange={e => setApiKey(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px', boxSizing:'border-box'}} />
       <input type="password" placeholder="Replicate API Key (saved)" value={replicateApiKey} onChange={e => setReplicateApiKey(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px', boxSizing:'border-box'}} />
 
+      {mode === 'open' && (
+        <p style={{ color: '#c77dff', fontSize: '0.9em', margin: '0 0 15px', padding: '8px 12px', border: '1px dashed #c77dff', borderRadius: '8px' }}>
+          ⚠️ Experimental mode — the flexible any-character / any-image pipeline.
+          Less tested than the Pinky modes; results can vary.
+        </p>
+      )}
+
+      {/* Voice picker — shown in both modes (Avatar defaults to Rex, changeable). */}
+      <h3>Voice (TTS narration)</h3>
+      <select value={activeVoice} onChange={e => setActiveVoice(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
+        {grokVoices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+      </select>
+
       {mode === 'open' ? (
         <>
-          <p style={{ color: '#c77dff', fontSize: '0.9em', margin: '0 0 15px', padding: '8px 12px', border: '1px dashed #c77dff', borderRadius: '8px' }}>
-            ⚠️ Experimental mode — the flexible any-character / any-image pipeline.
-            Less tested than the Pinky modes; results can vary.
-          </p>
-          <h3>Grok Voices (TTS narration)</h3>
-          <select value={selectedVoice} onChange={e => setSelectedVoice(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
-            {grokVoices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
-          </select>
-
           <h3>Character Description</h3>
           <textarea
             value={characterDescription}
@@ -764,7 +813,7 @@ function App() {
       ) : (
         <div style={{ margin: '10px 0 15px' }}>
           <p style={{ opacity: 0.8, margin: 0 }}>
-            🔒 Voice: Rex (locked) · Character: Pinky (locked)
+            🔒 Character: Pinky (locked)
           </p>
           {mode === 'avatar' && (
             <p style={{ opacity: 0.75, fontSize: '0.9em', margin: '6px 0 0' }}>
@@ -860,7 +909,27 @@ function App() {
             </label>
           )}
 
+          {/* Expressive delivery toolbar — inserts real xAI TTS speech tags. */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '6px' }}>
+            {SPEECH_TAGS.map(tag => (
+              <button
+                key={tag.label}
+                type="button"
+                title={`Insert ${tag.title}`}
+                onMouseDown={e => e.preventDefault()}   /* keep textarea selection */
+                onClick={() => applyTag(i, tag)}
+                style={{ fontSize: '0.75em', padding: '2px 7px', borderRadius: '6px', cursor: 'pointer' }}
+              >
+                {tag.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: '0.75em', opacity: 0.6, margin: '3px 0 0' }}>
+            Wrap selected text or insert tags to control pacing &amp; emotion — real xAI TTS controls that shape how the narration sounds.
+          </div>
+
           <textarea
+            ref={el => { if (el) dialogueRefs.current[i] = el; }}
             value={s.dialogue || ''}
             onChange={e => { const ns = [...scenes]; ns[i].dialogue = e.target.value; setScenes(ns); }}
             rows="5"
