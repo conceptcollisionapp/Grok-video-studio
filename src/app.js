@@ -22,6 +22,17 @@ const PINKY_AVATAR_PROMPT = "A pink paper-slip cartoon news anchor delivering " 
   "the news straight to camera with confident, professional energy and subtle, " +
   "natural head movements.";
 
+// Pinky Newscaster / Pinky Avatar: one fixed anchor image drives every
+// character scene, plus a default spoken outro. All editable/replaceable.
+const DEFAULT_ANCHOR_IMAGE = "https://grok-video-studio-uploads-2026.s3.us-east-2.amazonaws.com/uploads/upload_bcece39ab61e40d6bb6488659dabfe08.jpg";
+const DEFAULT_OUTRO_IMAGE = "https://grok-video-studio-uploads-2026.s3.us-east-2.amazonaws.com/uploads/upload_f22e4f880b5d434fb546e7d7dff561c9.jpg";
+const DEFAULT_OUTRO_TEXT = "Check out layoffhedge.com for more information.";
+
+const BLANK_SCENE = () => ({
+  id: Date.now(), description: 'New scene', dialogue: '', isCharacterScene: true,
+  start: 0, duration: 8, end: 8, image: null, imagePreview: null, imageUrl: ''
+});
+
 function App() {
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('darkMode');
@@ -52,6 +63,14 @@ function App() {
   const [imageWarning, setImageWarning] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [lipsyncModel, setLipsyncModel] = useState(null);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  // Fixed anchor image + spoken outro for Pinky Newscaster / Pinky Avatar.
+  const [anchorImage, setAnchorImage] = useState(() => localStorage.getItem('anchorImage') ?? DEFAULT_ANCHOR_IMAGE);
+  const [anchorBusy, setAnchorBusy] = useState(false);
+  const [outroEnabled, setOutroEnabled] = useState(() => (localStorage.getItem('outroEnabled') ?? 'true') === 'true');
+  const [outroImage, setOutroImage] = useState(() => localStorage.getItem('outroImage') ?? DEFAULT_OUTRO_IMAGE);
+  const [outroDialogue, setOutroDialogue] = useState(() => localStorage.getItem('outroDialogue') ?? DEFAULT_OUTRO_TEXT);
+  const [outroBusy, setOutroBusy] = useState(false);
   const jobRef = useRef(null);
 
   // Real xAI TTS voice IDs (source: xAI TTS docs / GET /v1/tts/voices)
@@ -76,7 +95,11 @@ function App() {
     localStorage.setItem('resolution', resolution);
     localStorage.setItem('scenes', JSON.stringify(scenes));
     localStorage.setItem('videoHistory', JSON.stringify(videoHistory));
-  }, [mode, apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, resolution, scenes, videoHistory]);
+    localStorage.setItem('anchorImage', anchorImage);
+    localStorage.setItem('outroImage', outroImage);
+    localStorage.setItem('outroDialogue', outroDialogue);
+    localStorage.setItem('outroEnabled', outroEnabled);
+  }, [mode, apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, resolution, scenes, videoHistory, anchorImage, outroImage, outroDialogue, outroEnabled]);
 
   // One-time cleanup of keys from removed features (they stored blob: URLs,
   // which are invalid after a reload anyway).
@@ -114,6 +137,38 @@ function App() {
   }, [generating]);
 
   const toggleMode = () => setDarkMode(!darkMode);
+
+  // Upload a project-level image (anchor/outro) to S3 and store the URL.
+  const uploadProjectImage = async (file, setUrl, setBusy) => {
+    if (!file) return;
+    setBusy(true);
+    try {
+      setUrl(await uploadFile(file));
+    } catch (e) {
+      setStatus('Image upload failed: ' + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Reset the current mode's builder inputs to a blank starting state. Does NOT
+  // touch video History, API keys, resolution, or the selected mode.
+  const clearAll = () => {
+    setScenes([BLANK_SCENE()]);
+    setScript('');
+    setGeneratedVideoUrl('');
+    setStageTimings([]);
+    setTotalSeconds(null);
+    if (mode === 'open') setCharacterDescription('');
+    if (mode === 'pinky' || mode === 'avatar') {
+      setAnchorImage(DEFAULT_ANCHOR_IMAGE);
+      setOutroImage(DEFAULT_OUTRO_IMAGE);
+      setOutroDialogue(DEFAULT_OUTRO_TEXT);
+      setOutroEnabled(true);
+    }
+    setClearConfirmOpen(false);
+    setStatus('Cleared.');
+  };
 
   const uploadFile = async (file) => {
     const fd = new FormData();
@@ -305,34 +360,51 @@ function App() {
       setStatus("Please enter your xAI API Key");
       return;
     }
+    const isLocked = mode === 'pinky' || mode === 'avatar';
+    const isPublicUrl = (u) => !!u && !u.startsWith('blob:');
 
-    // Lip-sync scenes require a Replicate key — block before submitting.
-    const hasCharacterScene = scenes.some(s => s.isCharacterScene);
+    // Character scenes (incl. a spoken outro) need a Replicate key.
+    const hasCharacterScene = scenes.some(s => s.isCharacterScene) || (isLocked && outroEnabled);
     if (hasCharacterScene && !replicateApiKey) {
-      setStatus("Replicate API key required for character lip-sync scenes.");
+      setStatus("Replicate API key required for character scenes.");
       return;
     }
 
     // Never submit while an upload is in flight or with a blob: URL — xAI can
     // only fetch the real public URLs returned by /upload.
-    if (scenes.some(s => s.uploading)) {
-      setStatus('Please wait — a scene image is still uploading.');
+    if (scenes.some(s => s.uploading) || anchorBusy || outroBusy) {
+      setStatus('Please wait — an image is still uploading.');
       return;
     }
-    const badIdx = scenes.findIndex(s => {
-      const url = s.imageUrl || s.image || '';
-      return !url || url.startsWith('blob:');
-    });
-    if (badIdx !== -1) {
-      setStatus(`Scene ${badIdx + 1} needs an uploaded image or a public image URL.`);
-      return;
+    if (isLocked) {
+      // Pinky modes: character scenes use the Anchor Image; b-roll uses its own.
+      if (scenes.some(s => s.isCharacterScene) && !isPublicUrl(anchorImage)) {
+        setStatus('Add an Anchor Image — it drives every character scene in this mode.');
+        return;
+      }
+      if (outroEnabled && !isPublicUrl(outroImage)) {
+        setStatus('The outro needs an image, or turn the outro off.');
+        return;
+      }
+      const badB = scenes.findIndex(s => !s.isCharacterScene && !isPublicUrl(s.imageUrl || s.image));
+      if (badB !== -1) {
+        setStatus(`Scene ${badB + 1} (still image) needs an uploaded image or a public image URL.`);
+        return;
+      }
+    } else {
+      const badIdx = scenes.findIndex(s => !isPublicUrl(s.imageUrl || s.image));
+      if (badIdx !== -1) {
+        setStatus(`Scene ${badIdx + 1} needs an uploaded image or a public image URL.`);
+        return;
+      }
     }
 
     // Narration is scene dialogue only — no fallback to Notes or canned text.
-    const fullScript = scenes
-      .map(s => (s.dialogue || '').trim())
-      .filter(Boolean)
-      .join(' ');
+    // The outro line counts too in Pinky modes.
+    const fullScript = [
+      ...scenes.map(s => (s.dialogue || '').trim()),
+      (isLocked && outroEnabled) ? (outroDialogue || '').trim() : '',
+    ].filter(Boolean).join(' ');
     if (!fullScript) {
       setStatus('Add dialogue to at least one scene — narration is generated from scene dialogue.');
       return;
@@ -344,9 +416,18 @@ function App() {
       return;
     }
 
+    // Images that will actually be used, for the low-res/aspect warning.
+    const usedImages = isLocked
+      ? [
+          ...(scenes.some(s => s.isCharacterScene) ? [anchorImage] : []),
+          ...scenes.filter(s => !s.isCharacterScene).map(s => s.imageUrl || s.image),
+          ...(outroEnabled ? [outroImage] : []),
+        ].filter(Boolean)
+      : scenes.map(s => s.imageUrl || s.image).filter(Boolean);
+
     setStatus('');
     await refreshLipsyncModel();   // reflect the current Railway setting, not a stale mount value
-    setImageWarning(await anyRiskyImages(scenes.map(s => s.imageUrl || s.image).filter(Boolean)));
+    setImageWarning(await anyRiskyImages(usedImages));
     setConfirmOpen(true);
   };
 
@@ -357,30 +438,40 @@ function App() {
     setStageTimings([]);
     setTotalSeconds(null);
 
-    // Recomputed here (requestGenerate's copy is block-scoped to validation).
-    const fullScript = scenes
-      .map(s => (s.dialogue || '').trim())
-      .filter(Boolean)
-      .join(' ');
+    const isPinky = mode === 'pinky';
+    const isAvatar = mode === 'avatar';
+    const isLocked = isPinky || isAvatar;
 
-    // Per-scene payload the backend needs for the pipeline.
+    // Per-scene payload. In Pinky modes, character scenes use the fixed Anchor
+    // Image; b-roll keeps its own; a spoken outro is appended if enabled.
     const scenePayload = scenes.map(s => ({
-      image_url: s.imageUrl || s.image || '',
+      image_url: (isLocked && s.isCharacterScene) ? anchorImage : (s.imageUrl || s.image || ''),
       dialogue: s.dialogue || '',
       // clamp here too — a mid-edit raw value may not have blurred yet
       duration: clampDuration(s.duration),
       isCharacterScene: !!s.isCharacterScene
     }));
+    if (isLocked && outroEnabled && outroImage) {
+      scenePayload.push({
+        image_url: outroImage,
+        dialogue: outroDialogue || '',
+        duration: clampDuration(8),
+        isCharacterScene: true
+      });
+    }
+
+    const fullScript = scenePayload.map(s => (s.dialogue || '').trim()).filter(Boolean).join(' ');
 
     // Snapshot inputs so a failed job's history entry can rebuild the studio
     // for a from-scratch fallback (blob previews stripped — they don't survive).
     jobInputsRef.current = {
       scenes: scenes.map(({ imagePreview, ...s }) => s),
       modeId: mode,
-      modeLabel: mode === 'pinky' ? 'Pinky Newscaster' : mode === 'avatar' ? 'Pinky Avatar' : 'Open Studio',
+      modeLabel: isPinky ? 'Pinky Newscaster' : isAvatar ? 'Pinky Avatar' : 'Open Studio',
       characterDescription,
       voiceId: selectedVoice,
-      resolution
+      resolution,
+      anchorImage, outroImage, outroDialogue, outroEnabled
     };
 
     const formData = new FormData();
@@ -391,9 +482,7 @@ function App() {
     // Pinky Newscaster and Pinky Avatar both lock the voice + character; Open
     // Studio uses whatever the user configured. Only Avatar changes how
     // character scenes are processed (the character_pipeline flag).
-    const isPinky = mode === 'pinky';
-    const isAvatar = mode === 'avatar';
-    formData.append('voice_id', (isPinky || isAvatar) ? 'rex' : selectedVoice);
+    formData.append('voice_id', isLocked ? 'rex' : selectedVoice);
     formData.append('resolution', resolution);
     formData.append('character_description',
       isAvatar ? PINKY_AVATAR_PROMPT
@@ -476,6 +565,10 @@ function App() {
     if (cfg.characterDescription != null) setCharacterDescription(cfg.characterDescription);
     if (cfg.voiceId) setSelectedVoice(cfg.voiceId);
     if (cfg.resolution) setResolution(cfg.resolution);
+    if (cfg.anchorImage != null) setAnchorImage(cfg.anchorImage);
+    if (cfg.outroImage != null) setOutroImage(cfg.outroImage);
+    if (cfg.outroDialogue != null) setOutroDialogue(cfg.outroDialogue);
+    if (cfg.outroEnabled != null) setOutroEnabled(cfg.outroEnabled);
   };
 
   // Retry a failed job: ask the backend to resume from where it died (reusing
@@ -527,18 +620,23 @@ function App() {
 
   return (
     <div style={{ padding: '15px', maxWidth: '100%', margin: 'auto', minHeight: '100vh' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-        <h1>📰 Grok Video Studio</h1>
-        <button onClick={toggleMode} style={{ padding: '8px 16px', borderRadius: '8px' }}>
-          {darkMode ? '☀️ Light' : '🌙 Dark'}
-        </button>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '10px' }}>
+        <h1 style={{ margin: 0 }}>📰 Grok Video Studio</h1>
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button onClick={() => setClearConfirmOpen(true)} title="Reset this mode's inputs (keeps History)" style={{ padding: '8px 16px', borderRadius: '8px', border: '1px solid #ff6b6b', color: '#ff6b6b', background: 'transparent' }}>
+            🧹 Clear All
+          </button>
+          <button onClick={toggleMode} style={{ padding: '8px 16px', borderRadius: '8px' }}>
+            {darkMode ? '☀️ Light' : '🌙 Dark'}
+          </button>
+        </div>
       </div>
 
       <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', flexWrap: 'wrap' }}>
         {[
-          { id: 'open', label: '🎬 Open Studio' },
+          { id: 'open', label: '🎬 Open Studio (experimental)', experimental: true },
           { id: 'pinky', label: '📌 Pinky Newscaster' },
-          { id: 'avatar', label: '🧪 Pinky Avatar (beta)', experimental: true },
+          { id: 'avatar', label: '🎭 Pinky Avatar' },
         ].map(t => {
           const active = mode === t.id && !showHistory;
           return (
@@ -644,6 +742,10 @@ function App() {
 
       {mode === 'open' ? (
         <>
+          <p style={{ color: '#c77dff', fontSize: '0.9em', margin: '0 0 15px', padding: '8px 12px', border: '1px dashed #c77dff', borderRadius: '8px' }}>
+            ⚠️ Experimental mode — the flexible any-character / any-image pipeline.
+            Less tested than the Pinky modes; results can vary.
+          </p>
           <h3>Grok Voices (TTS narration)</h3>
           <select value={selectedVoice} onChange={e => setSelectedVoice(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
             {grokVoices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
@@ -664,11 +766,33 @@ function App() {
             🔒 Voice: Rex (locked) · Character: Pinky (locked)
           </p>
           {mode === 'avatar' && (
-            <p style={{ color: '#c77dff', fontSize: '0.9em', margin: '6px 0 0' }}>
-              🧪 Experimental pipeline: character scenes are generated in one step
-              by Kling Avatar (image + audio → talking video), skipping xAI motion
-              and the separate lip-sync. Still-image scenes are unchanged.
+            <p style={{ opacity: 0.75, fontSize: '0.9em', margin: '6px 0 0' }}>
+              Character scenes are generated in one step by Kling Avatar (image +
+              audio → talking video). Still-image scenes are unchanged.
             </p>
+          )}
+
+          {/* Fixed anchor image (every character scene) + spoken outro. */}
+          <h3 style={{ marginBottom: '4px' }}>Anchor Image</h3>
+          <p style={{ opacity: 0.7, fontSize: '0.85em', margin: '0 0 8px' }}>Used automatically for every character/talking scene in this mode.</p>
+          {anchorImage && <img src={anchorImage} alt="anchor" style={{ maxWidth: '150px', display: 'block', borderRadius: '6px', marginBottom: '6px' }} />}
+          <input value={anchorImage} onChange={e => setAnchorImage(e.target.value)} placeholder="Public image URL" style={{ width: '100%', padding: '8px', margin: '0 0 6px', boxSizing: 'border-box' }} />
+          <input type="file" accept="image/*" onChange={e => uploadProjectImage(e.target.files[0], setAnchorImage, setAnchorBusy)} />
+          {anchorBusy && <span style={{ marginLeft: '10px' }}>⏳ Uploading…</span>}
+
+          <h3 style={{ marginBottom: '4px', marginTop: '18px' }}>Outro Scene</h3>
+          <label style={{ display: 'block', marginBottom: '8px' }}>
+            <input type="checkbox" checked={outroEnabled} onChange={e => setOutroEnabled(e.target.checked)} />{' '}
+            Include a spoken outro at the end (Pinky says the line below)
+          </label>
+          {outroEnabled && (
+            <>
+              {outroImage && <img src={outroImage} alt="outro" style={{ maxWidth: '150px', display: 'block', borderRadius: '6px', marginBottom: '6px' }} />}
+              <input value={outroImage} onChange={e => setOutroImage(e.target.value)} placeholder="Outro image URL" style={{ width: '100%', padding: '8px', margin: '0 0 6px', boxSizing: 'border-box' }} />
+              <input type="file" accept="image/*" onChange={e => uploadProjectImage(e.target.files[0], setOutroImage, setOutroBusy)} />
+              {outroBusy && <span style={{ marginLeft: '10px' }}>⏳ Uploading…</span>}
+              <textarea value={outroDialogue} onChange={e => setOutroDialogue(e.target.value)} rows="2" placeholder="Outro spoken line" style={{ width: '100%', padding: '10px', margin: '8px 0 0', boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5' }} />
+            </>
           )}
         </div>
       )}
@@ -682,7 +806,11 @@ function App() {
       <textarea value={script} onChange={e => setScript(e.target.value)} rows="14" style={{width:'100%', padding:'12px', marginBottom:'15px', minHeight:'260px', boxSizing:'border-box', resize:'vertical', fontFamily:'inherit', lineHeight:'1.5'}} placeholder="Paste your full script here, then break it into each scene's dialogue below. (Narration is generated from the per-scene dialogue.)" />
 
       <h3>Timeline — Scenes (drag ⠿ to reorder)</h3>
-      {scenes.map((s, i) => (
+      {scenes.map((s, i) => {
+        // In Pinky modes, character scenes use the fixed Anchor Image, so their
+        // per-scene image upload is hidden. B-roll keeps its own image.
+        const hideImg = (mode === 'pinky' || mode === 'avatar') && s.isCharacterScene;
+        return (
         <div
           key={s.id}
           onDragOver={e => e.preventDefault()}
@@ -734,21 +862,27 @@ function App() {
             );
           })()}
 
-          <input
-            value={s.imageUrl || ''}
-            onChange={e => { const ns = [...scenes]; ns[i].imageUrl = e.target.value; setScenes(ns); }}
-            placeholder="Or paste a public image URL (overrides upload)"
-            style={{ width: '100%', padding: '8px', margin: '6px 0' }}
-          />
-          <input type="file" accept="image/*" onChange={e => updateSceneImage(i, e.target.files[0])} />
-          {s.uploading && <span style={{ marginLeft: '10px' }}>⏳ Uploading…</span>}
-          {!s.uploading && s.image && !s.uploadError && <span style={{ marginLeft: '10px' }}>✅ Uploaded</span>}
-          {s.uploadError && <span style={{ marginLeft: '10px', color: '#ff6b6b' }}>⚠️ {s.uploadError}</span>}
-          {(s.imagePreview || s.image) && (
-            <div style={{ margin: '5px 0' }}>
-              <img src={s.imagePreview || s.image} alt="still" style={{ maxWidth: '150px', display: 'block' }} />
-              <button type="button" onClick={() => clearSceneImage(i)} style={{ marginTop: '5px' }}>🗑 Remove image</button>
-            </div>
+          {hideImg ? (
+            <p style={{ opacity: 0.7, fontSize: '0.85em', margin: '6px 0' }}>🔒 Uses the Anchor Image (set once above).</p>
+          ) : (
+            <>
+              <input
+                value={s.imageUrl || ''}
+                onChange={e => { const ns = [...scenes]; ns[i].imageUrl = e.target.value; setScenes(ns); }}
+                placeholder="Or paste a public image URL (overrides upload)"
+                style={{ width: '100%', padding: '8px', margin: '6px 0' }}
+              />
+              <input type="file" accept="image/*" onChange={e => updateSceneImage(i, e.target.files[0])} />
+              {s.uploading && <span style={{ marginLeft: '10px' }}>⏳ Uploading…</span>}
+              {!s.uploading && s.image && !s.uploadError && <span style={{ marginLeft: '10px' }}>✅ Uploaded</span>}
+              {s.uploadError && <span style={{ marginLeft: '10px', color: '#ff6b6b' }}>⚠️ {s.uploadError}</span>}
+              {(s.imagePreview || s.image) && (
+                <div style={{ margin: '5px 0' }}>
+                  <img src={s.imagePreview || s.image} alt="still" style={{ maxWidth: '150px', display: 'block' }} />
+                  <button type="button" onClick={() => clearSceneImage(i)} style={{ marginTop: '5px' }}>🗑 Remove image</button>
+                </div>
+              )}
+            </>
           )}
 
           {/* Start/End are derived from scene order + durations (recomputeTiming);
@@ -767,7 +901,8 @@ function App() {
 
           <button onClick={() => deleteScene(i)} style={{marginTop: '8px'}}>Delete Scene</button>
         </div>
-      ))}
+        );
+      })}
       <button onClick={addScene}>+ Add Scene</button>
 
       <br /><br />
@@ -824,6 +959,19 @@ function App() {
       )}
 
         </>
+      )}
+
+      {clearConfirmOpen && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '20px' }}>
+          <div style={{ background: darkMode ? '#1c1c1c' : '#fff', border: '1px solid #555', borderRadius: '12px', padding: '24px', maxWidth: '420px', width: '100%' }}>
+            <h3 style={{ marginTop: 0 }}>Clear all inputs?</h3>
+            <p>This resets this mode's scenes and inputs to a blank starting state. Unsaved work is discarded. Your video History is not affected.</p>
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '20px' }}>
+              <button onClick={() => setClearConfirmOpen(false)} style={{ padding: '10px 20px', borderRadius: '8px' }}>Cancel</button>
+              <button onClick={clearAll} style={{ padding: '10px 20px', borderRadius: '8px', background: '#ff6b6b', border: 'none', color: '#fff', fontWeight: 'bold' }}>Yes, Clear All</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {confirmOpen && (
