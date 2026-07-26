@@ -368,6 +368,31 @@ def still_to_video(image_path, dst, duration, width, height):
     ])
 
 
+def still_to_video_panzoom(image_path, dst, duration, width, height):
+    """Ken Burns: a slow, subtle zoom-in over the still (no API cost, pure
+    ffmpeg). Same normalized output (codec/size/fps) as still_to_video so it
+    concats cleanly. Letterbox first (keeps graphs/text fully visible), upscale
+    for smooth motion, then zoompan back to WxH."""
+    fps = 30
+    frames = max(2, int(round(max(duration, 0.5) * fps)))
+    zmax = 1.10                       # ends ~10% zoomed — subtle, broadcast feel
+    inc = (zmax - 1.0) / frames       # reach zmax at the last frame
+    vf = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+        f"scale={width * 4}:{height * 4},"        # upscale for jitter-free zoom
+        f"zoompan=z='min(zoom+{inc:.6f},{zmax})':d={frames}:"
+        f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+        f"s={width}x{height}:fps={fps}"
+    )
+    _run([
+        FFMPEG, "-y", "-i", image_path,
+        "-vf", vf,
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
+        "-an", dst,
+    ])
+
+
 def fit_clip_seconds(src, dst, lo, hi):
     """Trim (too long) or freeze-frame pad (too short) a clip into [lo, hi]
     seconds — for models with a hard clip-length limit (Kling: 2-10s).
@@ -936,12 +961,16 @@ def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
             source = raw_clip
         normalize_clip(source, norm, width, height)
     else:
-        # B-roll: hold the original image — zero motion, no regeneration.
+        # B-roll: the original image, no generative model. Default is a subtle
+        # Ken Burns pan/zoom (free, local ffmpeg); "static" holds it frozen.
         img = os.path.join(job_work, f"scene{idx}_img{_ext_from_url(scene['image_url'])}")
         if not (reuse and os.path.exists(img)):
             _download(scene["image_url"], img)
         hold = speech_len if dialogue else max(1.0, min(60.0, float(scene.get("duration") or 8)))
-        still_to_video(img, norm, hold, width, height)
+        if (scene.get("motion") or "panzoom") == "static":
+            still_to_video(img, norm, hold, width, height)
+        else:
+            still_to_video_panzoom(img, norm, hold, width, height)
 
     # --- audio segment fitted to EXACTLY the clip's length ----------------- #
     # This is what keeps concatenated narration and video aligned 1:1.

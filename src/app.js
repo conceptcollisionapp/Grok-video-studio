@@ -1,20 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-// Fixed character used by the "Pinky Newscaster" mode (voice + description
-// locked); "Open Studio" mode leaves both fully user-configurable.
-// Broad identity only (colors, stamp, face, outfit, setting) — the uploaded
-// scene image carries the fine visual detail. Small texture details like the
-// dog-eared corner were rendered literally (a dog ear on the character), so
-// they're deliberately omitted.
-const PINKY_CHARACTER_DESCRIPTION = "Flat 2D cartoon anthropomorphic " +
-  "character made of salmon-pink termination-slip paper, with a red " +
-  "'TERMINATED' stamp across his lower half. Simple black dot eyes, thick " +
-  "angled black eyebrows, small flat mouth, rosy cheeks. Navy suit jacket, " +
-  "white collared shirt, red necktie, small black cartoon hands. Seated at " +
-  "a glossy blue-and-glass news desk in a photorealistic modern TV newsroom " +
-  "with floor-to-ceiling city-view windows and studio lighting. The flat 2D " +
-  "cartoon character contrasts with the photorealistic backdrop.";
-
 // Pinky Avatar mode's prompt for kwaivgi/kling-avatar-v2. That model's prompt
 // governs ACTION/emotion/camera (the uploaded image carries appearance), so
 // this is a simplified delivery-oriented description, not the full look.
@@ -22,10 +7,9 @@ const PINKY_AVATAR_PROMPT = "A pink paper-slip cartoon news anchor delivering " 
   "the news straight to camera with confident, professional energy and subtle, " +
   "natural head movements.";
 
-// Pinky Newscaster / Pinky Avatar: one fixed anchor image drives every
-// character scene, plus a default spoken outro. All editable/replaceable.
-const DEFAULT_ANCHOR_IMAGE = "https://grok-video-studio-uploads-2026.s3.us-east-2.amazonaws.com/uploads/upload_bcece39ab61e40d6bb6488659dabfe08.jpg";
-const DEFAULT_OUTRO_IMAGE = "https://grok-video-studio-uploads-2026.s3.us-east-2.amazonaws.com/uploads/upload_f22e4f880b5d434fb546e7d7dff561c9.jpg";
+// Pinky Avatar: a fixed anchor image drives every character scene, plus an
+// optional spoken outro. Images are user-supplied portraits (Avatar needs a
+// face); the outro line has a sensible default.
 const DEFAULT_OUTRO_TEXT = "Check out layoffhedge.com for more information.";
 
 const BLANK_SCENE = () => ({
@@ -39,8 +23,9 @@ function App() {
     return saved === null ? true : saved === 'true';
   });
 
-  // 'pinky' = Pinky Newscaster (locked voice/character), 'open' = Open Studio.
-  const [mode, setMode] = useState(() => localStorage.getItem('studioMode') || 'pinky');
+  // Modes: 'avatar' = Pinky Avatar (default), 'open' = Open Studio.
+  // (The old 'pinky' Newscaster mode was removed; map any saved value to avatar.)
+  const [mode, setMode] = useState(() => localStorage.getItem('studioMode') === 'open' ? 'open' : 'avatar');
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('xaiKey') || '');
   const [replicateApiKey, setReplicateApiKey] = useState(() => localStorage.getItem('replicateKey') || '');
   const backendUrl = 'https://grok-video-studio-production.up.railway.app';
@@ -64,25 +49,21 @@ function App() {
   const [generating, setGenerating] = useState(false);
   const [lipsyncModel, setLipsyncModel] = useState(null);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
-  // Fixed anchor image + spoken outro. Pinky Newscaster (lip-sync) can use a
-  // wide scene; Pinky Avatar (kling-avatar-v2) needs a face, so it keeps its
-  // OWN anchor/outro images (portraits) — hence separate per-mode state.
-  const [anchorImage, setAnchorImage] = useState(() => localStorage.getItem('anchorImage') ?? DEFAULT_ANCHOR_IMAGE);
+  // Pinky Avatar's fixed anchor image + spoken outro (user-supplied portraits —
+  // kling-avatar-v2 needs a face).
   const [avatarAnchorImage, setAvatarAnchorImage] = useState(() => localStorage.getItem('avatarAnchorImage') ?? '');
   const [anchorBusy, setAnchorBusy] = useState(false);
   const [outroEnabled, setOutroEnabled] = useState(() => (localStorage.getItem('outroEnabled') ?? 'true') === 'true');
-  const [outroImage, setOutroImage] = useState(() => localStorage.getItem('outroImage') ?? DEFAULT_OUTRO_IMAGE);
   const [avatarOutroImage, setAvatarOutroImage] = useState(() => localStorage.getItem('avatarOutroImage') ?? '');
   const [outroDialogue, setOutroDialogue] = useState(() => localStorage.getItem('outroDialogue') ?? DEFAULT_OUTRO_TEXT);
   const [outroBusy, setOutroBusy] = useState(false);
   const jobRef = useRef(null);
 
-  // Active anchor/outro image for the current mode (Avatar has its own).
   const isAvatarMode = mode === 'avatar';
-  const activeAnchor = isAvatarMode ? avatarAnchorImage : anchorImage;
-  const setActiveAnchor = isAvatarMode ? setAvatarAnchorImage : setAnchorImage;
-  const activeOutroImage = isAvatarMode ? avatarOutroImage : outroImage;
-  const setActiveOutroImage = isAvatarMode ? setAvatarOutroImage : setOutroImage;
+  const activeAnchor = avatarAnchorImage;
+  const setActiveAnchor = setAvatarAnchorImage;
+  const activeOutroImage = avatarOutroImage;
+  const setActiveOutroImage = setAvatarOutroImage;
 
   // Real xAI TTS voice IDs (source: xAI TTS docs / GET /v1/tts/voices)
   const grokVoices = [
@@ -106,13 +87,11 @@ function App() {
     localStorage.setItem('resolution', resolution);
     localStorage.setItem('scenes', JSON.stringify(scenes));
     localStorage.setItem('videoHistory', JSON.stringify(videoHistory));
-    localStorage.setItem('anchorImage', anchorImage);
     localStorage.setItem('avatarAnchorImage', avatarAnchorImage);
-    localStorage.setItem('outroImage', outroImage);
     localStorage.setItem('avatarOutroImage', avatarOutroImage);
     localStorage.setItem('outroDialogue', outroDialogue);
     localStorage.setItem('outroEnabled', outroEnabled);
-  }, [mode, apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, resolution, scenes, videoHistory, anchorImage, avatarAnchorImage, outroImage, avatarOutroImage, outroDialogue, outroEnabled]);
+  }, [mode, apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, resolution, scenes, videoHistory, avatarAnchorImage, avatarOutroImage, outroDialogue, outroEnabled]);
 
   // One-time cleanup of keys from removed features (they stored blob: URLs,
   // which are invalid after a reload anyway).
@@ -176,11 +155,6 @@ function App() {
     if (mode === 'avatar') {
       setAvatarAnchorImage('');   // portrait is user-supplied for Avatar
       setAvatarOutroImage('');
-      setOutroDialogue(DEFAULT_OUTRO_TEXT);
-      setOutroEnabled(true);
-    } else if (mode === 'pinky') {
-      setAnchorImage(DEFAULT_ANCHOR_IMAGE);
-      setOutroImage(DEFAULT_OUTRO_IMAGE);
       setOutroDialogue(DEFAULT_OUTRO_TEXT);
       setOutroEnabled(true);
     }
@@ -317,7 +291,7 @@ function App() {
           status: 'done',
           url: s.video_url,
           date: Date.now(),
-          mode: (jobInputsRef.current && jobInputsRef.current.modeLabel) || (mode === 'pinky' ? 'Pinky Newscaster' : 'Open Studio')
+          mode: (jobInputsRef.current && jobInputsRef.current.modeLabel) || (mode === 'avatar' ? 'Pinky Avatar' : 'Open Studio')
         }, ...prev].slice(0, 50));
         setGenerating(false);
         setStatus(`✅ Video ready! (${t})`);
@@ -329,7 +303,7 @@ function App() {
           status: 'failed',
           job_id: jobId,
           date: Date.now(),
-          mode: (jobInputsRef.current && jobInputsRef.current.modeLabel) || (mode === 'pinky' ? 'Pinky Newscaster' : 'Open Studio'),
+          mode: (jobInputsRef.current && jobInputsRef.current.modeLabel) || (mode === 'avatar' ? 'Pinky Avatar' : 'Open Studio'),
           failedStage: s.failed_stage || s.stage || 'Unknown',
           error: s.message || 'Generation failed',
           config: jobInputsRef.current   // enables full-regen fallback
@@ -371,14 +345,14 @@ function App() {
   };
 
   // Validate everything, then open the confirmation dialog. Shared by BOTH
-  // modes (Open Studio and Pinky Newscaster) — the actual request only fires
+  // modes (Open Studio and Pinky Avatar) — the actual request only fires
   // from the dialog's "Yes, Generate".
   const requestGenerate = async () => {
     if (!apiKey) {
       setStatus("Please enter your xAI API Key");
       return;
     }
-    const isLocked = mode === 'pinky' || mode === 'avatar';
+    const isLocked = mode === 'avatar';
     const isPublicUrl = (u) => !!u && !u.startsWith('blob:');
 
     // Character scenes (incl. a spoken outro) need a Replicate key.
@@ -460,9 +434,8 @@ function App() {
     setStageTimings([]);
     setTotalSeconds(null);
 
-    const isPinky = mode === 'pinky';
     const isAvatar = mode === 'avatar';
-    const isLocked = isPinky || isAvatar;
+    const isLocked = isAvatar;
 
     // Per-scene payload. In Pinky modes, character scenes use the fixed Anchor
     // Image; b-roll keeps its own; a spoken outro is appended if enabled.
@@ -471,7 +444,9 @@ function App() {
       dialogue: s.dialogue || '',
       // clamp here too — a mid-edit raw value may not have blurred yet
       duration: clampDuration(s.duration),
-      isCharacterScene: !!s.isCharacterScene
+      isCharacterScene: !!s.isCharacterScene,
+      // b-roll motion (ignored for character scenes); default subtle pan/zoom
+      motion: s.motion || 'panzoom'
     }));
     if (isLocked && outroEnabled && activeOutroImage) {
       scenePayload.push({
@@ -489,7 +464,7 @@ function App() {
     jobInputsRef.current = {
       scenes: scenes.map(({ imagePreview, ...s }) => s),
       modeId: mode,
-      modeLabel: isPinky ? 'Pinky Newscaster' : isAvatar ? 'Pinky Avatar' : 'Open Studio',
+      modeLabel: isAvatar ? 'Pinky Avatar' : 'Open Studio',
       characterDescription,
       voiceId: selectedVoice,
       resolution,
@@ -501,15 +476,11 @@ function App() {
     formData.append('api_key', apiKey);
     formData.append('replicate_api_key', replicateApiKey);
     formData.append('scenes', JSON.stringify(scenePayload));
-    // Pinky Newscaster and Pinky Avatar both lock the voice + character; Open
-    // Studio uses whatever the user configured. Only Avatar changes how
-    // character scenes are processed (the character_pipeline flag).
-    formData.append('voice_id', isLocked ? 'rex' : selectedVoice);
+    // Pinky Avatar locks the voice + character and uses the avatar pipeline;
+    // Open Studio uses the user's config and the lip-sync pipeline.
+    formData.append('voice_id', isAvatar ? 'rex' : selectedVoice);
     formData.append('resolution', resolution);
-    formData.append('character_description',
-      isAvatar ? PINKY_AVATAR_PROMPT
-      : isPinky ? PINKY_CHARACTER_DESCRIPTION
-      : characterDescription.trim());
+    formData.append('character_description', isAvatar ? PINKY_AVATAR_PROMPT : characterDescription.trim());
     formData.append('character_pipeline', isAvatar ? 'avatar' : 'lipsync');
 
     try {
@@ -587,16 +558,13 @@ function App() {
     if (cfg.characterDescription != null) setCharacterDescription(cfg.characterDescription);
     if (cfg.voiceId) setSelectedVoice(cfg.voiceId);
     if (cfg.resolution) setResolution(cfg.resolution);
-    // Restore the anchor/outro into the mode-appropriate slot.
+    // Anchor/outro only apply to Avatar mode.
     if (cfg.modeId === 'avatar') {
       if (cfg.anchorImage != null) setAvatarAnchorImage(cfg.anchorImage);
       if (cfg.outroImage != null) setAvatarOutroImage(cfg.outroImage);
-    } else {
-      if (cfg.anchorImage != null) setAnchorImage(cfg.anchorImage);
-      if (cfg.outroImage != null) setOutroImage(cfg.outroImage);
+      if (cfg.outroDialogue != null) setOutroDialogue(cfg.outroDialogue);
+      if (cfg.outroEnabled != null) setOutroEnabled(cfg.outroEnabled);
     }
-    if (cfg.outroDialogue != null) setOutroDialogue(cfg.outroDialogue);
-    if (cfg.outroEnabled != null) setOutroEnabled(cfg.outroEnabled);
   };
 
   // Retry a failed job: ask the backend to resume from where it died (reusing
@@ -662,9 +630,8 @@ function App() {
 
       <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', flexWrap: 'wrap' }}>
         {[
-          { id: 'open', label: '🎬 Open Studio (experimental)', experimental: true },
-          { id: 'pinky', label: '📌 Pinky Newscaster' },
           { id: 'avatar', label: '🎭 Pinky Avatar' },
+          { id: 'open', label: '🎬 Open Studio (experimental)', experimental: true },
         ].map(t => {
           const active = mode === t.id && !showHistory;
           return (
@@ -847,7 +814,7 @@ function App() {
       {scenes.map((s, i) => {
         // In Pinky modes, character scenes use the fixed Anchor Image, so their
         // per-scene image upload is hidden. B-roll keeps its own image.
-        const hideImg = (mode === 'pinky' || mode === 'avatar') && s.isCharacterScene;
+        const hideImg = mode === 'avatar' && s.isCharacterScene;
         return (
         <div
           key={s.id}
@@ -882,6 +849,16 @@ function App() {
             />{' '}
             {s.isCharacterScene ? 'Animate image (character speaking)' : 'Still image'}
           </label>
+
+          {!s.isCharacterScene && (
+            <label style={{ display: 'block', margin: '0 0 8px', fontSize: '0.9em' }}>
+              Motion:{' '}
+              <select value={s.motion || 'panzoom'} onChange={e => { const ns = [...scenes]; ns[i].motion = e.target.value; setScenes(ns); }}>
+                <option value="panzoom">Pan / Zoom (subtle)</option>
+                <option value="static">Static (no motion)</option>
+              </select>
+            </label>
+          )}
 
           <textarea
             value={s.dialogue || ''}
