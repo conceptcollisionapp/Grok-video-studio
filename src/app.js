@@ -670,8 +670,14 @@ function App() {
       </div>
 
       <div style={{ fontSize: '0.85em', opacity: 0.75, marginBottom: '15px' }}>
-        🎙 Lip-sync model: <strong>{lipsyncModel || '…'}</strong>
-        <button onClick={refreshLipsyncModel} title="Re-check the active model" style={{ marginLeft: '8px', padding: '1px 8px', borderRadius: '6px', cursor: 'pointer' }}>↻</button>
+        {mode === 'avatar' ? (
+          <>🎭 Avatar model: <strong>kwaivgi/kling-avatar-v2</strong> <span style={{ opacity: 0.7 }}>(single call — no separate lip-sync)</span></>
+        ) : (
+          <>
+            🎙 Lip-sync model: <strong>{lipsyncModel || '…'}</strong>
+            <button onClick={refreshLipsyncModel} title="Re-check the active model" style={{ marginLeft: '8px', padding: '1px 8px', borderRadius: '6px', cursor: 'pointer' }}>↻</button>
+          </>
+        )}
       </div>
 
       {showHistory ? (
@@ -995,7 +1001,9 @@ function App() {
               ⏳ This runs for several minutes. <strong>Keep this tab open and your screen awake</strong> until it finishes — on mobile especially, leaving the app or locking the screen can interrupt it and you may lose the result.
             </p>
             <p style={{ background: darkMode ? '#111' : '#eee', borderRadius: '8px', padding: '8px 12px' }}>
-              🎙 Active lip-sync model: <strong>{lipsyncModel || 'unavailable'}</strong>
+              {mode === 'avatar'
+                ? <>🎭 Avatar model: <strong>kwaivgi/kling-avatar-v2</strong></>
+                : <>🎙 Active lip-sync model: <strong>{lipsyncModel || 'unavailable'}</strong></>}
             </p>
             <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '20px' }}>
               <button onClick={() => setConfirmOpen(false)} style={{ padding: '10px 20px', borderRadius: '8px' }}>Cancel</button>
