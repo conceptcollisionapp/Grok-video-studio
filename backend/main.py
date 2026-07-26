@@ -972,7 +972,7 @@ def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
         if not (reuse and os.path.exists(img)):
             _download(scene["image_url"], img)
         hold = speech_len if dialogue else max(1.0, min(60.0, float(scene.get("duration") or 8)))
-        if (scene.get("motion") or "panzoom") == "static":
+        if (scene.get("motion") or "static") == "static":
             still_to_video(img, norm, hold, width, height)
         else:
             still_to_video_panzoom(img, norm, hold, width, height)

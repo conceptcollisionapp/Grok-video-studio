@@ -519,7 +519,7 @@ function App() {
       duration: clampDuration(s.duration),
       isCharacterScene: !!s.isCharacterScene,
       // b-roll motion (ignored for character scenes); default subtle pan/zoom
-      motion: s.motion || 'panzoom'
+      motion: s.motion || 'static'
     }));
     if (isLocked && outroEnabled && activeOutroImage) {
       // Outro is a narrated B-ROLL close: TTS the line, hold the image with
@@ -529,7 +529,7 @@ function App() {
         dialogue: outroDialogue || '',
         duration: clampDuration(8),
         isCharacterScene: false,
-        motion: 'panzoom'
+        motion: 'static'
       });
     }
 
@@ -870,7 +870,7 @@ function App() {
             Add a narrated outro at the end
           </label>
           <p style={{ opacity: 0.7, fontSize: '0.85em', margin: '0 0 8px' }}>
-            A narrated b-roll close: the line below is spoken over this image (held with a gentle pan/zoom). Any graphic or text card works — it's not a talking scene, so no face needed.
+            A narrated b-roll close: the line below is spoken over this image (held still). Any graphic or text card works — it's not a talking scene, so no face needed.
           </p>
           {outroEnabled && (
             <>
@@ -929,15 +929,15 @@ function App() {
               checked={!!s.isCharacterScene}
               onChange={e => { const ns = [...scenes]; ns[i].isCharacterScene = e.target.checked; setScenes(ns); }}
             />{' '}
-            {s.isCharacterScene ? 'Animate image (character speaking)' : 'Still image'}
+            {s.isCharacterScene ? 'Animate image (character speaking)' : 'Still image (click to animate)'}
           </label>
 
           {!s.isCharacterScene && (
             <label style={{ display: 'block', margin: '0 0 8px', fontSize: '0.9em' }}>
               Motion:{' '}
-              <select value={s.motion || 'panzoom'} onChange={e => { const ns = [...scenes]; ns[i].motion = e.target.value; setScenes(ns); }}>
-                <option value="panzoom">Pan / Zoom (subtle)</option>
+              <select value={s.motion || 'static'} onChange={e => { const ns = [...scenes]; ns[i].motion = e.target.value; setScenes(ns); }}>
                 <option value="static">Static (no motion)</option>
+                <option value="panzoom">Pan / Zoom (subtle)</option>
               </select>
             </label>
           )}
