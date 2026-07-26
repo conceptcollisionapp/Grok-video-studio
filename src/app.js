@@ -12,6 +12,22 @@ const PINKY_AVATAR_PROMPT = "A pink paper-slip cartoon news anchor delivering " 
 // face); the outro line has a sensible default.
 const DEFAULT_OUTRO_TEXT = "Check out layoffhedge.com for more information.";
 
+// Fixed default anchor/outro images for Pinky Avatar — permanent GitHub-hosted
+// URLs (never presigned/expiring).
+const DEFAULT_AVATAR_ANCHOR = "https://raw.githubusercontent.com/conceptcollisionapp/pinkys-assets/7b1c5c6f7661e1dd50a7629174c7b870566ca545/11771.jpg";
+const DEFAULT_AVATAR_OUTRO = "https://raw.githubusercontent.com/conceptcollisionapp/pinkys-assets/7b1c5c6f7661e1dd50a7629174c7b870566ca545/12044.jpg";
+
+// Old Pinky Newscaster defaults (the earlier S3 copies). If they're lingering
+// in localStorage they silently override the new defaults, so treat them as
+// stale and fall back to the new default.
+const STALE_ANCHOR_URLS = [
+  "https://grok-video-studio-uploads-2026.s3.us-east-2.amazonaws.com/uploads/upload_bcece39ab61e40d6bb6488659dabfe08.jpg",
+  "https://grok-video-studio-uploads-2026.s3.us-east-2.amazonaws.com/uploads/upload_f22e4f880b5d434fb546e7d7dff561c9.jpg",
+];
+// Return the stored value unless it's empty or a stale old URL, in which case
+// fall back to the given new default.
+const resolveAvatarImg = (stored, def) => (!stored || STALE_ANCHOR_URLS.includes(stored)) ? def : stored;
+
 const BLANK_SCENE = () => ({
   id: Date.now(), description: 'New scene', dialogue: '', isCharacterScene: true,
   start: 0, duration: 8, end: 8, image: null, imagePreview: null, imageUrl: ''
@@ -69,10 +85,10 @@ function App() {
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   // Pinky Avatar's fixed anchor image + spoken outro (user-supplied portraits —
   // kling-avatar-v2 needs a face).
-  const [avatarAnchorImage, setAvatarAnchorImage] = useState(() => localStorage.getItem('avatarAnchorImage') ?? '');
+  const [avatarAnchorImage, setAvatarAnchorImage] = useState(() => resolveAvatarImg(localStorage.getItem('avatarAnchorImage'), DEFAULT_AVATAR_ANCHOR));
   const [anchorBusy, setAnchorBusy] = useState(false);
   const [outroEnabled, setOutroEnabled] = useState(() => (localStorage.getItem('outroEnabled') ?? 'true') === 'true');
-  const [avatarOutroImage, setAvatarOutroImage] = useState(() => localStorage.getItem('avatarOutroImage') ?? '');
+  const [avatarOutroImage, setAvatarOutroImage] = useState(() => resolveAvatarImg(localStorage.getItem('avatarOutroImage'), DEFAULT_AVATAR_OUTRO));
   const [outroDialogue, setOutroDialogue] = useState(() => localStorage.getItem('outroDialogue') ?? DEFAULT_OUTRO_TEXT);
   const [outroBusy, setOutroBusy] = useState(false);
   const jobRef = useRef(null);
@@ -120,6 +136,13 @@ function App() {
   useEffect(() => {
     localStorage.removeItem('voicePreview');
     localStorage.removeItem('characterPreviews');
+    // Orphaned Pinky Newscaster keys (mode removed) — drop them, and drop any
+    // avatar anchor/outro still holding an old Newscaster default.
+    localStorage.removeItem('anchorImage');
+    localStorage.removeItem('outroImage');
+    ['avatarAnchorImage', 'avatarOutroImage'].forEach(k => {
+      if (STALE_ANCHOR_URLS.includes(localStorage.getItem(k))) localStorage.removeItem(k);
+    });
   }, []);
 
   useEffect(() => {
@@ -175,8 +198,8 @@ function App() {
     setTotalSeconds(null);
     if (mode === 'open') setCharacterDescription('');
     if (mode === 'avatar') {
-      setAvatarAnchorImage('');   // portrait is user-supplied for Avatar
-      setAvatarOutroImage('');
+      setAvatarAnchorImage(DEFAULT_AVATAR_ANCHOR);
+      setAvatarOutroImage(DEFAULT_AVATAR_OUTRO);
       setOutroDialogue(DEFAULT_OUTRO_TEXT);
       setOutroEnabled(true);
     }
