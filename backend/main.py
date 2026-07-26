@@ -673,7 +673,12 @@ def kling_avatar(image_url, audio_path, replicate_api_key, dst, prompt=None):
             "Kling Avatar payload -> ref=%s | image=%s | audio=%s (%d bytes) | prompt=%r",
             ref, image_url, os.path.basename(audio_path), _audio_bytes, prompt,
         )
-        output = client.run(ref, input=model_input)
+        try:
+            output = client.run(ref, input=model_input)
+        except Exception as e:  # noqa: BLE001 - diagnostic: surface the exact reason
+            logger.error("Kling Avatar FAILED (image=%s): %s: %s",
+                         image_url, type(e).__name__, e)
+            raise
     if isinstance(output, list):
         output = output[0] if output else None
     if output is None:
