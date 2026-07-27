@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Analytics } from '@vercel/analytics/react';
 
 // Pinky Avatar mode's prompt for kwaivgi/kling-avatar-v2. That model's prompt
 // governs ACTION/emotion/camera (the uploaded image carries appearance), so
@@ -1139,6 +1140,7 @@ function App() {
       )}
 
       <p>{status}</p>
+      <Analytics />
     </div>
   );
 }
