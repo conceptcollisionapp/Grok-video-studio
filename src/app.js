@@ -67,6 +67,7 @@ function App() {
   const [selectedVoice, setSelectedVoice] = useState(() => localStorage.getItem('voiceId') || 'ara');
   const [avatarVoice, setAvatarVoice] = useState(() => localStorage.getItem('avatarVoice') || 'rex');
   const [resolution, setResolution] = useState(() => localStorage.getItem('resolution') || '720p');
+  const [transition, setTransition] = useState(() => localStorage.getItem('transition') || 'none');
   const [scenes, setScenes] = useState(() => JSON.parse(localStorage.getItem('scenes') || '[{"id":1,"description":"News Anchor","dialogue":"","isCharacterScene":true,"start":0,"duration":12,"end":12,"image":null,"imageUrl":""}]'));
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState('');
   const [status, setStatus] = useState('');
@@ -128,13 +129,14 @@ function App() {
     localStorage.setItem('voiceId', selectedVoice);
     localStorage.setItem('avatarVoice', avatarVoice);
     localStorage.setItem('resolution', resolution);
+    localStorage.setItem('transition', transition);
     localStorage.setItem('scenes', JSON.stringify(scenes));
     localStorage.setItem('videoHistory', JSON.stringify(videoHistory));
     localStorage.setItem('avatarAnchorImage', avatarAnchorImage);
     localStorage.setItem('avatarOutroImage', avatarOutroImage);
     localStorage.setItem('outroDialogue', outroDialogue);
     localStorage.setItem('outroEnabled', outroEnabled);
-  }, [mode, apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, avatarVoice, resolution, scenes, videoHistory, avatarAnchorImage, avatarOutroImage, outroDialogue, outroEnabled]);
+  }, [mode, apiKey, replicateApiKey, darkMode, script, characterDescription, selectedVoice, avatarVoice, resolution, transition, scenes, videoHistory, avatarAnchorImage, avatarOutroImage, outroDialogue, outroEnabled]);
 
   // One-time cleanup of keys from removed features (they stored blob: URLs,
   // which are invalid after a reload anyway).
@@ -558,6 +560,7 @@ function App() {
     formData.append('resolution', resolution);
     formData.append('character_description', isAvatar ? PINKY_AVATAR_PROMPT : characterDescription.trim());
     formData.append('character_pipeline', isAvatar ? 'avatar' : 'lipsync');
+    formData.append('transition', transition);
 
     try {
       // Kicks off the pipeline and returns a job_id immediately (the work runs
@@ -888,6 +891,17 @@ function App() {
       <select value={resolution} onChange={e => setResolution(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'15px'}}>
         {resolutions.map(r => <option key={r} value={r}>{r}</option>)}
       </select>
+
+      <h3>Scene Transitions</h3>
+      <select value={transition} onChange={e => setTransition(e.target.value)} style={{width:'100%', padding:'12px', marginBottom:'4px'}}>
+        <option value="none">None (hard cut)</option>
+        <option value="crossfade">Crossfade</option>
+        <option value="fadeblack">Fade to black</option>
+        <option value="wipe">Wipe</option>
+      </select>
+      <p style={{ opacity: 0.65, fontSize: '0.8em', margin: '0 0 15px' }}>
+        A short (~0.4s) blend between scenes. Applies to the whole video.
+      </p>
 
       <h3>Full Script / Notes</h3>
       <textarea value={script} onChange={e => setScript(e.target.value)} rows="14" style={{width:'100%', padding:'12px', marginBottom:'15px', minHeight:'260px', boxSizing:'border-box', resize:'vertical', fontFamily:'inherit', lineHeight:'1.5'}} placeholder="Paste your full script here, then break it into each scene's dialogue below. (Narration is generated from the per-scene dialogue.)" />

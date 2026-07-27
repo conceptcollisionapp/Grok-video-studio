@@ -468,6 +468,57 @@ def concat_audio(audio_paths, dst, work_dir):
     ])
 
 
+# xfade transition names for the UI options (None handled by the caller).
+XFADE_TRANSITIONS = {"crossfade": "fade", "fadeblack": "fadeblack", "wipe": "wipeleft"}
+
+
+def concat_clips_xfade(clip_paths, dst, work_dir, xfade_name, t, durs):
+    """Concatenate clips with an xfade transition between each consecutive pair.
+
+    Each xfade overlaps its two inputs by `t` seconds, so the accumulated
+    stream shrinks by `t` per transition. Offset for the i-th xfade (combining
+    the accumulated clips 0..i-1 with clip i) = sum(durs[0..i-1]) - i*t, which
+    places the crossfade exactly at the tail of the accumulated stream. `durs`
+    are the measured clip durations (ffprobe) so offsets are exact, not guessed.
+    """
+    inputs = []
+    for p in clip_paths:
+        inputs += ["-i", p]
+    filters, prev, cum = [], "[0:v]", durs[0]
+    for i in range(1, len(clip_paths)):
+        offset = cum - i * t
+        out = "[vout]" if i == len(clip_paths) - 1 else f"[vx{i}]"
+        filters.append(
+            f"{prev}[{i}:v]xfade=transition={xfade_name}:"
+            f"duration={t:.3f}:offset={offset:.3f}{out}"
+        )
+        prev = out
+        cum += durs[i]
+    _run([
+        FFMPEG, "-y", *inputs, "-filter_complex", ";".join(filters),
+        "-map", "[vout]",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-an", dst,
+    ])
+
+
+def concat_audio_xfade(audio_paths, dst, work_dir, t):
+    """Join narration segments with acrossfade using the SAME `t` as the video
+    xfade, so audio and video shrink by an identical (N-1)*t and stay in sync.
+    acrossfade crossfades tail-to-head, so no explicit offsets are needed."""
+    inputs = []
+    for p in audio_paths:
+        inputs += ["-i", p]
+    filters, prev = [], "[0:a]"
+    for i in range(1, len(audio_paths)):
+        out = "[aout]" if i == len(audio_paths) - 1 else f"[ax{i}]"
+        filters.append(f"{prev}[{i}:a]acrossfade=d={t:.3f}{out}")
+        prev = out
+    _run([
+        FFMPEG, "-y", *inputs, "-filter_complex", ";".join(filters),
+        "-map", "[aout]", "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1", dst,
+    ])
+
+
 def overlay_audio(video_src, audio_src, dst):
     """Replace the video's audio with the full narration track (continuous audio).
 
@@ -817,13 +868,13 @@ def _get_job(job_id):
 
 
 def _retain_failed(job_id, job_work, scene_list, voice_id, resolution,
-                   character_description, character_pipeline):
+                   character_description, character_pipeline, transition):
     with _jobs_lock:
         RETAINED[job_id] = {
             "job_work": job_work, "failed_at": time.time(),
             "scene_list": scene_list, "voice_id": voice_id,
             "resolution": resolution, "character_description": character_description,
-            "character_pipeline": character_pipeline,
+            "character_pipeline": character_pipeline, "transition": transition,
         }
 
 
@@ -989,7 +1040,7 @@ def _process_scene(job_id, idx, scene, job_work, width, height, resolution,
 
 def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
                   scene_list, voice_id, resolution, character_description,
-                  reuse=False, character_pipeline="lipsync"):
+                  reuse=False, character_pipeline="lipsync", transition="none"):
     """Concurrent per-scene processing -> assembly -> upload.
     Runs in a background thread; progress + result are written to JOBS.
     reuse=True resumes a retried job from its retained work dir.
@@ -1070,14 +1121,27 @@ def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
             )
             return
 
-        # --- 2. assemble: video concat + narration concat ------------------- #
-        # Each scene's audio was fitted to exactly its clip's length, so the
-        # concatenated narration lines up with the concatenated video 1:1.
+        # --- 2. assemble: video + narration (hard cut, or xfade transitions) - #
+        # Each scene's audio was fitted to exactly its clip's length, so hard
+        # concat lines up 1:1. With a transition, video xfade and audio
+        # acrossfade use the SAME measured durations + duration `t`, so both
+        # shrink by (N-1)*t identically and stay in sync.
         stage("Combining clips + narration")
+        clips = [r["clip"] for r in results]
+        audios = [r["audio"] for r in results]
         combined_silent = os.path.join(job_work, "combined_silent.mp4")
-        concat_clips([r["clip"] for r in results], combined_silent, job_work)
         narration = os.path.join(job_work, "narration.wav")
-        concat_audio([r["audio"] for r in results], narration, job_work)
+        xfade_name = XFADE_TRANSITIONS.get(transition)
+        if xfade_name and len(clips) >= 2:
+            clip_durs = [probe_duration(c) for c in clips]
+            # Transition must be shorter than the shortest clip.
+            t = max(0.1, min(0.4, min(clip_durs) - 0.1))
+            logger.info("Transitions: %s (%.2fs) across %d clips", transition, t, len(clips))
+            concat_clips_xfade(clips, combined_silent, job_work, xfade_name, t, clip_durs)
+            concat_audio_xfade(audios, narration, job_work, t)
+        else:
+            concat_clips(clips, combined_silent, job_work)
+            concat_audio(audios, narration, job_work)
         narration_len = probe_duration(narration)
 
         final_name = f"{job_id}.mp4"
@@ -1117,7 +1181,7 @@ def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
                  failed_stage=failed_stage,
                  elapsed_seconds=round(time.time() - t0, 1), stage_timings=list(timings))
         _retain_failed(job_id, job_work, scene_list, voice_id, resolution,
-                       character_description, character_pipeline)
+                       character_description, character_pipeline, transition)
         retain = True
     except Exception as e:  # noqa: BLE001 - surface anything unexpected clearly
         failed_stage = _cur["name"] or (timings[-1]["stage"] if timings else "Unknown")
@@ -1126,7 +1190,7 @@ def _run_pipeline(job_id, base_url, api_key, replicate_api_key,
                  failed_stage=failed_stage,
                  elapsed_seconds=round(time.time() - t0, 1), stage_timings=list(timings))
         _retain_failed(job_id, job_work, scene_list, voice_id, resolution,
-                       character_description, character_pipeline)
+                       character_description, character_pipeline, transition)
         retain = True
     finally:
         # Keep the work dir only for a failed job (so retry can resume); the
@@ -1147,6 +1211,7 @@ def generate(
     resolution: str = Form("720p"),
     character_description: str = Form(""),
     character_pipeline: str = Form("lipsync"),   # 'lipsync' (default) or 'avatar'
+    transition: str = Form("none"),              # none|crossfade|fadeblack|wipe
 ):
     """Validate input, start the pipeline in the background, return a job_id.
     The heavy work runs for minutes (past proxy timeouts), so the client polls
@@ -1205,13 +1270,14 @@ def generate(
 
     # --- start the background pipeline, return the job handle -------------- #
     pipeline = "avatar" if character_pipeline == "avatar" else "lipsync"
+    trans = transition if transition in XFADE_TRANSITIONS else "none"
     job_id = str(uuid.uuid4())
     _set_job(job_id, job_id=job_id, status="processing", stage="Queued",
              started_at=time.time(), elapsed_seconds=0.0)
     _executor.submit(
         _run_pipeline, job_id, str(request.base_url), api_key,
         replicate_api_key, scene_list, voice_id, resolution, character_description,
-        False, pipeline,
+        False, pipeline, trans,
     )
     return JSONResponse({"job_id": job_id, "status": "processing"})
 
@@ -1264,6 +1330,7 @@ def retry_job(
         scene_list, retained["voice_id"], retained["resolution"],
         retained["character_description"], True,   # reuse=True
         retained.get("character_pipeline", "lipsync"),
+        retained.get("transition", "none"),
     )
     return JSONResponse({"job_id": job_id, "status": "processing", "recoverable": True})
 
