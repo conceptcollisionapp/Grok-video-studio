@@ -313,9 +313,15 @@ def _run(cmd, timeout=300):
             f"{os.path.basename(cmd[0])} timed out after {timeout}s"
         )
     if result.returncode != 0:
+        # ffmpeg's real error is at the END of stderr; the first ~2KB is the
+        # version/build banner. Show the TAIL, not the head, or the banner
+        # hides the actual failure.
+        err = (result.stderr or "").strip()
+        tail = err[-800:]
+        if len(err) > 800:
+            tail = "...(truncated)... " + tail
         raise PipelineError(
-            f"Command failed ({os.path.basename(cmd[0])}): "
-            f"{result.stderr.strip()[:400]}"
+            f"Command failed ({os.path.basename(cmd[0])}): {tail}"
         )
     return result
 
@@ -484,12 +490,22 @@ def concat_clips_xfade(clip_paths, dst, work_dir, xfade_name, t, durs):
     inputs = []
     for p in clip_paths:
         inputs += ["-i", p]
-    filters, prev, cum = [], "[0:v]", durs[0]
-    for i in range(1, len(clip_paths)):
+    n = len(clip_paths)
+    # Normalize every input to a common fps / pixel format / SAR / timebase
+    # BEFORE feeding xfade. xfade is strict: a single mismatch (e.g. a clip from
+    # lip-sync/avatar re-encode with a different timebase or SAR) makes it error
+    # out. Locally-produced clips already match, so this is a no-op there and a
+    # safety net for real-job clips coming from mixed sources.
+    filters = [
+        f"[{i}:v]fps=30,format=yuv420p,setsar=1,settb=AVTB[n{i}]"
+        for i in range(n)
+    ]
+    prev, cum = "[n0]", durs[0]
+    for i in range(1, n):
         offset = cum - i * t
-        out = "[vout]" if i == len(clip_paths) - 1 else f"[vx{i}]"
+        out = "[vout]" if i == n - 1 else f"[vx{i}]"
         filters.append(
-            f"{prev}[{i}:v]xfade=transition={xfade_name}:"
+            f"{prev}[n{i}]xfade=transition={xfade_name}:"
             f"duration={t:.3f}:offset={offset:.3f}{out}"
         )
         prev = out
